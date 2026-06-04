@@ -1,0 +1,36 @@
+# Ignore all files in output/ and dataset/, but allow .gitkeep to preserve folder structure
+# output/**
+# !output/**/
+
+# Ignore these paths completely
+ncdft1.zip
+ncdft2.zip
+**/*.pkl
+
+# Ignore data artifacts in src/
+src/**/*.pkl
+src/**/*.log
+src/**/*.out
+src/deprecated
+src/bulk_tmd.py
+src/eval_lg.py
+src/eval_wl.py
+src/interpolant.ipynb
+src/isotherm_lg.ipynb
+src/minOmega.py
+src/**/*.pyc
+
+data/ml_model/ml_dicts0
+data/ml_model/ml_dicts1
+data/ml_model/intermediate_models
+
+!output/**/.gitkeep
+!data/**/.gitkeep
+
+
+#To be added:
+src/libs/omega_minimization
+
+
+
+
