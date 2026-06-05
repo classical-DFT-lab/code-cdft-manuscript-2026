@@ -55,7 +55,6 @@ class CDFT():
                      compute_D2FX = compute_Jac,
                      detach_tensors = detach_tensors,
                     )
-        
         # Model parameters
         dx = self.mesh["dx"]  # (,)        
         beta = self.eq_params["beta"]  # (B, 1)   
@@ -85,7 +84,9 @@ class CDFT():
             ) # (B, 1, Nx, Nx)
 
             Jac_op = (
-                torch.eye(rho_h0.shape[-1], device=rho_h0.device)[None,None, ...]  # (B, 1, Nx, Nx)
+                torch.eye(
+                    rho_h0.shape[-1], device=rho_h0.device, dtype=rho_h0.dtype
+                )[None, None, ...]  # (B, 1, Nx, Nx)
                 + 
             #   (B, 1) x                (B, 1, Nx, 1) x    (B, 1, Nx, Nx)   (,)          
                 beta[...,None, None] *  rho_h0[...,None] * D *              dx
@@ -216,3 +217,62 @@ class CDFT():
         # Useful for the continuation algorithm
         #     (B, 1, Nx) (B, 1) ->       
         return -(rho_h0 / self.eq_params["mu"] [...,None])[...,None]  # (B, 1, Nx, 1)
+
+
+
+
+    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    # BULK COMPUTATIONS ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+    def Get_omega_bulk(self, rho):
+        # Parameters
+        beta = self.eq_params["beta"]  # (B, 1)
+        DF = self.gradients_FX_bulk(
+                                rho ,
+                                detach_tensors = False,
+                                compute_D2FX = False,
+                                )["DF"] #(B, 1)
+        
+        phiR = self.phiR_bulk(rho) #(B, 1, )
+        phiA = self.phiA_bulk(rho) #(B, 1,)
+        phiX = phiA + phiR # (B, 1,)
+
+        pres = rho/beta + (rho*DF - phiX)
+        omega = - pres
+        # omegaX = - (pres - rho/beta)
+        return omega
+
+    def GetChemPot_bulk(self, rho_guess):
+        """
+        Compute the chemical potential given the number of particles.
+
+        Args:
+            num_par (torch.Tensor): Number of particles (B, 1)
+            model (object): CDFT model object
+
+        Returns:
+            torch.Tensor: Chemical potential values (B, 1)
+        """
+        DF = self.gradients_FX_bulk( 
+                        rho_guess, 
+                        compute_D2FX = False,
+                        detach_tensors = True,
+                    )["DF"] # (B, 1)
+        
+        # Model parameters
+        beta = self.eq_params["beta"]   # (B, 1)
+        Lambda = self.eq_params["Lambda"]  #(,)
+        
+        # Compute the RHS of the EulerLagrange eq. rho = h0[rho] => rho_id * exp( - beta*DF ) 
+        chem_pot = 1/beta * torch.log(Lambda**3 * rho_guess)  + DF  # (B, 1)
+        return chem_pot
+
+
+    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    
+    def dfdmu_bulk(self, rho_h0):
+        # dfdN => partial derivative of the free energy w.r.t. number of particles N
+        # Useful for the continuation algorithm
+        #     (B, 1, ) (B, 1) ->       
+        return -(rho_h0 / self.eq_params["mu"])  # (B, 1, )

@@ -36,8 +36,9 @@ def adjoint(model,
                             grad_outputs=torch.ones_like(Loss), 
                             create_graph=True, 
                             retain_graph=True)[0]  # (BS, 1, Nx)
-    
-    UA = torch.linalg.solve(Jac_op_t, -dJ)  # (BS, 1, Nx)
+
+    rhs = (-dJ).unsqueeze(-1)  # (BS, 1, Nx, 1); Jac_op_t unchanged (BS, 1, Nx, Nx)
+    UA = torch.linalg.solve(Jac_op_t, rhs).squeeze(-1)  # (BS, 1, Nx)
 
     # Compute gradients
     grad = torch.sum(UA*res) 

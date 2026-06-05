@@ -10,7 +10,7 @@ Usage:
   python preprocess_data.py [--source SOURCE] [--output OUTPUT] [--wall WALL]
   e.g., python preprocess_data.py --skip-lda --wall wc
   --source: Root dir with N*/T_*/z_profile.csv (default: ../data/dataset/md_planar_wc)
-  --output: Output dir for z_profiles*.pkl (default: ../data/dataset/pkl/profiles_wl_wn2)
+  --output: Output dir for z_profiles*.pkl (default: ../data/dataset/pkl/profiles_wl_wc)
   --wall:   "wn2" or "wc" - sets output path if --output not given
 """
 import os
@@ -30,6 +30,12 @@ from libs.cdft_1d.external_potentials import LJ93
 from libs.solve_1d.newton import newton
 from libs.ml.surrogates import setDNN, setDNNRep, setWDA
 from libs.ml.loss import LossL1
+from libs.utils import (
+    dataframe_elementwise_map,
+    resolve_training_device,
+    sol_dtype,
+    tensors_to_cpu_for_storage,
+)
 
 
 def gather_profiles(root: Path) -> pd.DataFrame:
@@ -61,7 +67,7 @@ def gather_profiles(root: Path) -> pd.DataFrame:
 
     combined = pd.concat(frames, keys=keys, names=["N", "T"])
     grouped = combined.groupby(level=["N", "T"]).agg(list)
-    df_grouped = grouped.map(np.array)
+    df_grouped = dataframe_elementwise_map(grouped, np.array)
 
     # Map columns: psi->x, rho_mean->rho
     col_map = {"psi": "x"}
@@ -94,11 +100,12 @@ def build_z_profiles_0(df_md, mesh, eq_params, sol, device, Ew=1.2, sigmaw=1.2):
     )[None, ...].to(device)
 
     records = []
+    dt = sol_dtype(sol)
     for (N, T), row in df_md.iterrows():
         x_arr = np.array(row["x"]).flatten()
         rho_init = np.array(row["rho"]).flatten()
         # Initial guess: interpolate MD profile or use constant
-        rho_guess = torch.tensor(rho_init, dtype=torch.double, device=device)
+        rho_guess = torch.tensor(rho_init, dtype=dt, device=device)
         if len(rho_guess.shape) == 1:
             rho_guess = rho_guess[None, None, :]
         elif len(rho_guess.shape) == 2:
@@ -106,16 +113,17 @@ def build_z_profiles_0(df_md, mesh, eq_params, sol, device, Ew=1.2, sigmaw=1.2):
 
         # Interpolate to mesh if needed
         if rho_guess.shape[-1] != mesh["Nx"]:
-            from libs.utils import linear_interpolation
-            x_src = torch.tensor(x_arr, dtype=torch.double, device=device)
-            rho_src = torch.tensor(rho_init, dtype=torch.double, device=device)
-            rho_guess = linear_interpolation(x, x_src, rho_src)[None, None, :]
+            from libs.utils import linear_interpolate_1d_unsorted
+
+            x_src = torch.tensor(x_arr, dtype=dt, device=device)
+            rho_src = torch.tensor(rho_init, dtype=dt, device=device)
+            rho_guess = linear_interpolate_1d_unsorted(x, x_src, rho_src)[None, None, :]
 
         beta = 1.0 / T
-        mu_val = N / (2 * L) ** 2  # approximate for NVT
+        mu_val = N / (2 * 40) ** 2  # approximate for NVT
         eq_params_local = dict(eq_params)
-        eq_params_local["beta"] = torch.tensor(beta, dtype=torch.double, device=device)[None, None]
-        eq_params_local["mu"] = torch.tensor(mu_val, dtype=torch.double, device=device)[None, None]
+        eq_params_local["beta"] = torch.tensor(beta, dtype=dt, device=device)[None, None]
+        eq_params_local["mu"] = torch.tensor(mu_val, dtype=dt, device=device)[None, None]
         eq_params_local["Vext"] = Vext
 
         sol_local = dict(sol)
@@ -184,14 +192,18 @@ def main():
         output = (Path(script_dir) / ".." / "data" / "dataset" / "pkl" / f"profiles_wl_{args.wall}").resolve()
 
     output.mkdir(parents=True, exist_ok=True)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    DEVICE_KIND = "auto"  # or "cuda" | "mps" | "cpu"; override with env TORCH_DEVICE
+    device = resolve_training_device(DEVICE_KIND)
+    print(f"Using device: {device}")
+    # Tensor dtype for DFT tensors (torch.float64 or torch.float32)
+    TORCH_DTYPE = torch.float32
     torch.manual_seed(42)
 
     # 1. Gather z_profiles.pkl from z_profile.csv
     print(f"Scanning {source} for z_profile.csv ...")
     df_md = gather_profiles(source)
     z_profiles_path = output / "z_profiles.pkl"
-    df_md.to_pickle(z_profiles_path)
+    tensors_to_cpu_for_storage(df_md).to_pickle(z_profiles_path)
     Ns = df_md.index.get_level_values("N").unique()
     print(f"Wrote {z_profiles_path} with {len(df_md)} profiles")
     for N in Ns:
@@ -200,15 +212,15 @@ def main():
 
     # 2. Build z_profiles_0.pkl (LDA reference)
     if args.skip_lda:
-        print("Skipping LDA solve (--skip-lda); using MD rho as reference.")
+        print("Skipping LDA solve (--skip-lda); using source rho as reference.")
         df_0 = df_md[["x", "rho"]].copy()
     else:
         print("Computing LDA reference profiles (z_profiles_0)...")
         R, Lambda = 1.0, 1.0
         L = 30.0
-        xmin, xmax = -L, L
+        xmin, xmax = 0, 2*L
         Nx = int(2 * L / 0.2)
-        x = torch.linspace(xmin, xmax, Nx, dtype=torch.double).to(device)
+        x = torch.linspace(xmin, xmax, Nx, dtype=TORCH_DTYPE).to(device)
         dx = x[1] - x[0]
         Ew, sigmaw = (1.2, 1.2) if args.wall == "wn2" else (1.0, 2.0)
         x_wall = xmin - 0.001 * sigmaw
@@ -219,29 +231,30 @@ def main():
             "Nx": Nx,
             "x_bc": [xmin, xmax],
             "x": x,
-            "x_wall": torch.tensor(x_wall, device=device),
+            "x_wall": torch.tensor(x_wall, dtype=TORCH_DTYPE, device=device),
             "dx": dx.to(device),
         }
         eq_params = {
-            "R": torch.tensor(R, device=device),
-            "mu": torch.tensor(0.3, device=device)[None, None],
-            "beta": torch.tensor(1 / 0.95, device=device)[None, None],
-            "Lambda": torch.tensor(Lambda, device=device),
+            "R": torch.tensor(R, dtype=TORCH_DTYPE, device=device),
+            "mu": torch.tensor(0.3, dtype=TORCH_DTYPE, device=device)[None, None],
+            "beta": torch.tensor(1 / 0.95, dtype=TORCH_DTYPE, device=device)[None, None],
+            "Lambda": torch.tensor(Lambda, dtype=TORCH_DTYPE, device=device),
             "dft_type": "LDA",
             "ensemble": "NVT",
             "str_param": "N",
-            "sigma_attr": torch.tensor(1.0, device=device),
-            "eps_attr": torch.tensor(1.0, device=device),
-            "cutoff_attr": torch.tensor(2.5, device=device),
-            "Ew": torch.tensor(Ew, device=device),
-            "sigmaw": torch.tensor(sigmaw, device=device),
+            "sigma_attr": torch.tensor(1.0, dtype=TORCH_DTYPE, device=device),
+            "eps_attr": torch.tensor(1.0, dtype=TORCH_DTYPE, device=device),
+            "cutoff_attr": torch.tensor(2.5, dtype=TORCH_DTYPE, device=device),
+            "Ew": torch.tensor(Ew, dtype=TORCH_DTYPE, device=device),
+            "sigmaw": torch.tensor(sigmaw, dtype=TORCH_DTYPE, device=device),
             "Vext": None,
             "BC_R": "NONE",
             "fast": False,
         }
         sol = {
-            "rho_guess": torch.zeros((1, 1, Nx), dtype=torch.double, device=device),
+            "rho_guess": torch.zeros((1, 1, Nx), dtype=TORCH_DTYPE, device=device),
             "device": device,
+            "dtype": TORCH_DTYPE,
             "outdir": "",
             "datadir": "",
             "pkldir": "",
@@ -253,7 +266,7 @@ def main():
         df_0 = build_z_profiles_0(df_md, mesh, eq_params, sol, device, Ew, sigmaw)
 
     z_profiles_0_path = output / "z_profiles_0.pkl"
-    df_0.to_pickle(z_profiles_0_path)
+    tensors_to_cpu_for_storage(df_0).to_pickle(z_profiles_0_path)
     print(f"Wrote {z_profiles_0_path}")
 
     print(f"\nDone. Run adj_train.py (pkldir={output})")

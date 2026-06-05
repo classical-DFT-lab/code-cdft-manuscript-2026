@@ -2,7 +2,7 @@ import os
 import torch
 import matplotlib.pyplot as plt
 import pickle 
-from libs import thermodynamics as tmd 
+from libs.utils import sol_dtype, tensors_to_cpu_for_storage
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # CONTINUATION METHOD
@@ -35,7 +35,8 @@ def continuation(
 	"""
 
 	# # Q_flat = kwargs["Q_flat"]
-	sol_curve = [sol_0]
+	# Store curve on CPU so pickled / returned artifacts work on any machine.
+	sol_curve = [tensors_to_cpu_for_storage(sol_0)]
 
 	for k in range(continuation_steps):
 		print()
@@ -56,14 +57,14 @@ def continuation(
 			"mu" : mu_.detach().cpu(),
 			"omegaX" : omegaX_i.detach().cpu(),
 			"OmegaX" : OmegaX_i.detach().cpu()/(2*model.mesh["L"]),
-			"rhocoex_vl" : model.sol["rho_vl"],
+			"rhocoex_vl" : tensors_to_cpu_for_storage(model.sol["rho_vl"]),
 			})
-			torch.cuda.empty_cache()
-
-
-			print("\step:",k, "\t\t" + model.eq_params["str_param"] + ":", mu_[0,0].item())
-			print(f"Memory allocated: {torch.cuda.memory_allocated() / 1e6:.2f} MB")
-			print(f"Memory reserved:  {torch.cuda.memory_reserved() / 1e6:.2f} MB")
+			_dev = model.sol["device"]
+			print("\step:", k, "\t\t" + model.eq_params["str_param"] + ":", mu_[0, 0].item())
+			if torch.device(_dev).type == "cuda":
+				torch.cuda.empty_cache()
+				print(f"Memory allocated: {torch.cuda.memory_allocated() / 1e6:.2f} MB")
+				print(f"Memory reserved:  {torch.cuda.memory_reserved() / 1e6:.2f} MB")
 
 			each = 5
 			if plotdir is not None and k%each==0:
@@ -173,6 +174,7 @@ def _continuation_step(
 		x_new = (u_new, lam_new):   final newton solution. It solves: f(u_new, lam_new) = 0
 	"""
 	device = u0.device
+	td = sol_dtype(model.sol)
 	B = u0.shape[0]
 	Nx = u0.shape[2]
 	
@@ -197,17 +199,17 @@ def _continuation_step(
 
 	A_t_temp = torch.cat([dfdu, dfdlam], dim=-1)  # (B, 1, Nx, Nx+1)
 	A_t = torch.cat([A_t_temp, 
-					torch.ones(B,1, 1,Nx + 1, dtype=torch.double, device=device)
+					torch.ones(B,1, 1,Nx + 1, dtype=td, device=device)
 					], 
 					dim=-2)  # (B, 1, Nx+1, Nx+1)
 	
 	b_t = torch.cat([
-					torch.zeros((B, 1, Nx), dtype=torch.double, device=device),
-					torch.ones((B, 1, 1), dtype=torch.double, device=device)
+					torch.zeros((B, 1, Nx), dtype=td, device=device),
+					torch.ones((B, 1, 1), dtype=td, device=device)
 			], dim=-1)  # (B, 1, Nx+1)
 	
-	# Tangent vector
-	tau = torch.linalg.solve(A_t, b_t)  # (B,1, Nx+1)
+	# Tangent vector; rhs (B,1,Nx+1) -> (B,1,Nx+1,1) for linalg.solve without changing A_t shape
+	tau = torch.linalg.solve(A_t, b_t)  # (B, 1, Nx+1)
 	if torch.isnan(tau).any() or torch.isinf(tau).any(): 
 		print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\nPredictor step failed: consider solving for the nullspace of the Jacobian\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
 		return None
@@ -263,10 +265,10 @@ def _continuation_step(
 		
 		b_c = torch.cat([
 							-res,  # (B,1, Nx)
-							torch.zeros((B,1, 1), dtype=torch.double, device=device),
+							torch.zeros((B,1, 1), dtype=td, device=device),
 				], dim=-1)  # (B,1, Nx+1)
 
-		dX = torch.linalg.solve(A_c, b_c)   # (B, 1, Nx+1)
+		dX = torch.linalg.solve(A_c, b_c)  # (B, 1, Nx+1)
 		dU, dLam = dX[...,:-1], dX[...,-1]  # (B, 1, Nx), (B, 1)
 
 		# Intermidiate newton step
@@ -279,7 +281,8 @@ def _continuation_step(
 		k += 1
 
 		del res, dfdu, dfdlam, A_c, b_c, dU, dLam
-		torch.cuda.empty_cache()
+		if torch.device(device).type == "cuda":
+			torch.cuda.empty_cache()
 	
 	# print("|dU| =", torch.abs(dU).mean().item(),
 	#       "\t|dLam| =", torch.abs(dLam).mean().item())

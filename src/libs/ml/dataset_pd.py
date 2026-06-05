@@ -1,22 +1,41 @@
 import os
 import pickle
 import torch
+import numpy as np
+from torch.utils.data import Dataset, DataLoader
+from libs.io_utils import load_pickle, DataNotFoundError
+import matplotlib.pyplot as plt
+import torch
+from torch.utils.data import Dataset, DataLoader
+from libs.utils import (
+    linear_interpolate_1d_unsorted,
+    normalize_profiles_nt_multiindex,
+    profile_nt_index_key,
+    sol_dtype,
+)
+def _to_numpy_1d(x):
+    if hasattr(x, "detach"):
+        return x.detach().cpu().numpy().astype(np.float64, copy=False).reshape(-1)
+    return np.asarray(x, dtype=np.float64).reshape(-1)
+
+import pickle
+import torch
 from torch.utils.data import Dataset, DataLoader
 from libs.utils import *
-from libs.io_utils import load_pickle, DataNotFoundError
 import matplotlib.pyplot as plt
 import torch
 from torch.utils.data import Dataset, DataLoader
 from libs.utils import linear_interpolation
 
+
 class MY_DATASET_FROM_DF(Dataset):
-    def __init__(self, dataframe, dataframe_0, target_grid, device, transform=True):
+    def __init__(self, dataframe, dataframe_0, target_grid, device, transform=True, dtype=torch.float64):
         """
         Args:
             dataframe (pd.DataFrame): DataFrame with MultiIndex or tuple column ('N', 'T') and columns x, rho, rho_fit
             target_grid (Tensor): Grid to interpolate onto
             transform (bool): If True, interpolate onto target grid
-            batches_in_list (bool): Whether to wrap each output in an extra batch dimension
+            dtype: torch dtype for tensors (should match sol["dtype"] / TORCH_DTYPE in training script)
         """
         self.df = dataframe.reset_index(drop=False)
         self.df_md = dataframe
@@ -24,6 +43,7 @@ class MY_DATASET_FROM_DF(Dataset):
         self.target_grid = target_grid.to(device)
         self.transform = transform
         self.device = device
+        self.dtype = dtype
 
     def __len__(self):
         return len(self.df)
@@ -33,15 +53,15 @@ class MY_DATASET_FROM_DF(Dataset):
         
         N = row['N']
         T = row['T']
-        x = torch.tensor(row['x'], dtype=torch.double, device=self.device)  # (Nx)
-        rho = torch.tensor(row['rho'], dtype=torch.double, device=self.device)  # (Nx)
-        rho_fit = torch.tensor(row['rho_fit'], dtype=torch.double, device=self.device)  # (Nx)
-        rho_0 = torch.tensor(self.df_0.loc[(N, T)]["rho"], dtype=torch.double, device=self.device)  # (Nx)
-        x_0 = torch.tensor(self.df_0.loc[(N, T)]["x"], dtype=torch.double, device=self.device)  # (Nx)
+        x = torch.as_tensor(row['x'], dtype=self.dtype, device=self.device)  # (Nx)
+        rho = torch.as_tensor(row['rho'], dtype=self.dtype, device=self.device)  # (Nx)
+        rho_fit = torch.as_tensor(row['rho_fit'], dtype=self.dtype, device=self.device)  # (Nx)
+        rho_0 = torch.as_tensor(self.df_0.loc[(N, T)]["rho"], dtype=self.dtype, device=self.device)  # (Nx)
+        x_0 = torch.as_tensor(self.df_0.loc[(N, T)]["x"], dtype=self.dtype, device=self.device)  # (Nx)
 
-        N = torch.tensor(N, dtype=torch.double, device=self.device) [None]
-        beta = torch.tensor(1.0 / T, dtype=torch.double, device=self.device) [None]
-        T = torch.tensor(T, dtype=torch.double, device=self.device) [None]
+        N = torch.tensor(N, dtype=self.dtype, device=self.device)[None]
+        beta = torch.tensor(1.0 / T, dtype=self.dtype, device=self.device)[None]
+        T = torch.tensor(T, dtype=self.dtype, device=self.device)[None]
 
         if self.transform:
             rho = self.interpolate_rho(x, rho, self.target_grid)  # (1, Nx)
@@ -59,7 +79,7 @@ class MY_DATASET_FROM_DF(Dataset):
         }
 
     def interpolate_rho(self, x_src, rho_src, x_target):
-        rho_interp = linear_interpolation(x_target, x_src - x_src[0] + x_target[0], rho_src)[None,...]
+        rho_interp = linear_interpolation(x_target, (x_src - x_src[0] + 0.05) + x_target[0], rho_src)[None,...]
         return rho_interp 
 
 def my_collate_fn_old(batch):
@@ -80,37 +100,32 @@ def my_collate_fn(batch):
 
 
 def setDatasetObject(good_N, good_T, datadir, mesh, sol, batch_size, transform, batches_in_list):
-    z_profiles_path = os.path.join(datadir, "z_profiles.pkl")
-    z_profiles_0_path = os.path.join(datadir, "z_profiles_0.pkl")
-
-    df = load_pickle(
-        z_profiles_path,
-        description="MD density profiles (z_profiles.pkl)",
-        hint="Run: python preprocess_data.py --source ../data/dataset/md_planar_wc --wall wn2",
-    )
-    mask = (
-        df.index.get_level_values("N").isin(good_N) &
-        df.index.get_level_values("T").isin(good_T)
-    )
-    df = df[mask]
+    
+    with open(datadir + "z_profiles.pkl", "rb") as f:
+        df = pickle.load(f)
+        mask = ( # with a ~( is the negative mask
+            df.index.get_level_values("N").isin(good_N) &
+            df.index.get_level_values("T").isin(good_T)
+        )
+        df = df[mask]  
 
     print(f"Loaded data with {len(df)} samples.")
 
-    df_0 = load_pickle(
-        z_profiles_0_path,
-        description="Reference LDA profiles (z_profiles_0.pkl)",
-        hint="Run: python preprocess_data.py (or use --skip-lda for quick setup)",
-    )
-    mask_0 = (
-        df_0.index.get_level_values("N").isin(good_N) &
-        df_0.index.get_level_values("T").isin(good_T)
-    )
-    df_0 = df_0[mask_0]
+    with open(datadir + "z_profiles_0.pkl", "rb") as f:
+        df_0 = pickle.load(f)
+        mask = ( # with a ~( is the negative mask
+            df_0.index.get_level_values("N").isin(good_N) &
+            df_0.index.get_level_values("T").isin(good_T)
+        )
+        df_0 = df_0[mask]  
 
     print(f"Loaded data with {len(df_0)} samples.")
 
     target_grid = mesh["x"]
-    dataset = MY_DATASET_FROM_DF(df, df_0, target_grid, device=sol["device"], transform=transform)
+    td = sol_dtype(sol)
+    dataset = MY_DATASET_FROM_DF(
+        df, df_0, target_grid, device=sol["device"], transform=transform, dtype=td
+    )
 
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, #pin_memory=True,
                             collate_fn=(my_collate_fn_old if batches_in_list else my_collate_fn))
@@ -128,9 +143,7 @@ def setDatasetObject(good_N, good_T, datadir, mesh, sol, batch_size, transform, 
         break  # just one batch
 
     plt.legend()
-    plot_path = os.path.join(sol["outdir"], "plot_train", "rho_df_data.png")
-    os.makedirs(os.path.dirname(plot_path), exist_ok=True)
-    plt.savefig(plot_path)
+    plt.savefig(sol["outdir"] + "plot_train/rho_df_data.png")
     plt.close()
 
     return dataset, dataloader

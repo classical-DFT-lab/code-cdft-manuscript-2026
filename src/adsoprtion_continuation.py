@@ -27,16 +27,13 @@ from libs.ml.surrogates import setDNN, setWDA, setDNNRep, load_ml_state_dicts
 from libs.ml.loss import LossL1
 from libs.io_utils import load_pickle, DataNotFoundError
 from libs.plot_utils import get_plot_dir, ensure_plot_dir
-from libs import thermodynamics as tmd
+from libs.utils import resolve_training_device, tensors_to_cpu_for_storage
 
 plt.rcParams["text.usetex"] = False
 
 # ------------------------------------------------------------------------------
 # Configuration
 # ------------------------------------------------------------------------------
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-# os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
 # Wall type: "wn2" or "wc" (sets Vext params and pkldir)
 WALL = "wc"
 
@@ -50,15 +47,19 @@ else:
     pkldir = os.path.join(datadir, "dataset", "pkl", "profiles_wl") + "/"
 
 plotdir = get_plot_dir(script_dir, "..", "output", "plot_adsorption_isotherm")
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# device = torch.device("cpu")
+DEVICE_KIND = "auto"  # or "cuda" | "mps" | "cpu"; override with env TORCH_DEVICE
+device = resolve_training_device(DEVICE_KIND)
+if device.type == "cuda":
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
+# os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 print(f"Using device: {device}")
+TORCH_DTYPE = torch.float64
 torch.manual_seed(42)
 
 # Flags
 JACOBIAN = "STABLE"
 USE_MODEL = 1
-USE_DBH_DIAMETER = 0  # 1: use Barker-Henderson diameter scaling when USE_MODEL
+USE_DBH_DIAMETER = 1  # 1: use Barker-Henderson diameter scaling when USE_MODEL
 TRAIN_DNN = 0
 TRAIN_WDA = 0
 RESTART_ML_MODEL = 1
@@ -106,10 +107,11 @@ cutoff_wall = 10. * R
 # ------------------------------------------------------------------------------
 # Mesh
 # ------------------------------------------------------------------------------
+ContactArea = 40*40 
 L = 30.
 xmin, xmax = -L, L
 Nx = int(2 * L / (0.15 * R))
-x = torch.linspace(xmin, xmax, Nx, dtype=torch.double).to(device)
+x = torch.linspace(xmin, xmax, Nx, dtype=TORCH_DTYPE).to(device)
 dx = x[1] - x[0]
 x_wall = xmin - 0.001 * sigmaw
 BS = 1
@@ -127,24 +129,24 @@ Vext = (
 
 BC_R = "NONE"  # Right BC: NONE, ZEROGRAD, SYMM available
 
-rho_guess = torch.zeros((BS, 1, Nx), dtype=torch.double).to(device)
+rho_guess = torch.zeros((BS, 1, Nx), dtype=TORCH_DTYPE).to(device)
 
 # ------------------------------------------------------------------------------
 # Build parameter dicts
 # ------------------------------------------------------------------------------
 eq_params = {
-    "R": torch.tensor(R).to(device),
-    "mu": torch.tensor(mu).to(device)[None, None],
-    "beta": torch.tensor(beta).to(device)[None, None],
-    "Lambda": torch.tensor(Lambda).to(device),
+    "R": torch.tensor(R, dtype=TORCH_DTYPE, device=device),
+    "mu": torch.tensor(mu, dtype=TORCH_DTYPE, device=device)[None, None],
+    "beta": torch.tensor(beta, dtype=TORCH_DTYPE, device=device)[None, None],
+    "Lambda": torch.tensor(Lambda, dtype=TORCH_DTYPE, device=device),
     "dft_type": dft_type,
     "ensemble": ensemble,
     "str_param": str_param,
-    "sigma_attr": torch.tensor(sigma_attr).to(device),
-    "eps_attr": torch.tensor(eps_attr).to(device),
-    "cutoff_attr": torch.tensor(cutoff_attr).to(device),
-    "Ew": torch.tensor(Ew).to(device),
-    "sigmaw": torch.tensor(sigmaw).to(device),
+    "sigma_attr": torch.tensor(sigma_attr, dtype=TORCH_DTYPE, device=device),
+    "eps_attr": torch.tensor(eps_attr, dtype=TORCH_DTYPE, device=device),
+    "cutoff_attr": torch.tensor(cutoff_attr, dtype=TORCH_DTYPE, device=device),
+    "Ew": torch.tensor(Ew, dtype=TORCH_DTYPE, device=device),
+    "sigmaw": torch.tensor(sigmaw, dtype=TORCH_DTYPE, device=device),
     "Vext": Vext,
     "BC_R": BC_R,
     "fast": fast,
@@ -157,13 +159,14 @@ mesh = {
     "Nx": Nx,
     "x_bc": [xmin, xmax],
     "x": x,
-    "x_wall": torch.tensor(x_wall).to(device),
+    "x_wall": torch.tensor(x_wall, dtype=TORCH_DTYPE, device=device),
     "dx": dx.to(device),
 }
 
 sol = {
     "rho_guess": rho_guess,
     "device": device,
+    "dtype": TORCH_DTYPE,
     "outdir": outdir,
     "datadir": datadir,
     "pkldir": pkldir,
@@ -186,12 +189,12 @@ def run_evaluation(T_val, N_val, N_start, target_density, rho_init, refine, plot
     plotdir_local = plotdir_ or plotdir
 
         
-    eq_params["beta"] = torch.tensor(1/T_val, dtype=torch.double).to(device)[None, None]
-    eq_params["mu"] = N_start / (20**2) 
+    eq_params["beta"] = torch.tensor(1/T_val, dtype=TORCH_DTYPE, device=device)[None, None]
+    eq_params["mu"] = N_start / ContactArea
     # eq_params["mu"] = torch.tensor(0.7 * N_val / (20**2), dtype=torch.double).to(device)[None, None]
     eq_params["target_density"] = target_density
     sol["rho_guess"] = rho_init.to(device)
-    sol["rho_vl"] = torch.tensor([0.,0.], dtype=torch.double, device=device)
+    sol["rho_vl"] = torch.tensor([0.,0.], dtype=TORCH_DTYPE, device=device)
 
     model = CDFT(eq_params, mesh, sol)
     sd = ml_state_dicts
@@ -213,9 +216,9 @@ def run_evaluation(T_val, N_val, N_start, target_density, rho_init, refine, plot
     if refine:
         # Continuation
         sol_0 = {
-            "mu": out_fwd["U"].sum()*dx*torch.ones([mesh["BS"], 1], dtype=torch.double).to(device),
+            "mu": out_fwd["U"].sum()*dx*torch.ones([mesh["BS"], 1], dtype=TORCH_DTYPE, device=device),
             "rho": out_fwd["U"], # (1, Nx)
-            "rhocoex_vl": torch.tensor([0., 0.], dtype=torch.double).to(device),
+            "rhocoex_vl": torch.tensor([0., 0.], dtype=TORCH_DTYPE, device=device),
         }
 
         sol_curve = continuation(
@@ -233,8 +236,8 @@ def run_evaluation(T_val, N_val, N_start, target_density, rho_init, refine, plot
         mu_ = mu_.detach(); rho_ = rho_.detach()
     
         # Final Newton solve at corrected mu
-        model.sol["rho_guess"] = rho_.squeeze().to(device).double()[None, None, :]
-        model.eq_params["mu"] = mu_.squeeze().to(device).double()[None, None]
+        model.sol["rho_guess"] = rho_.squeeze().to(device=device, dtype=TORCH_DTYPE)[None, None, :]
+        model.eq_params["mu"] = mu_.squeeze().to(device=device, dtype=TORCH_DTYPE)[None, None]
         # model.eq_params["mu"] = torch.tensor(target_density * 2*L, dtype=torch.double).to(device)[None, None] if ensemble == "NVT" else mu_
         
         out_final = newton(
@@ -292,10 +295,10 @@ for N_val in N_vals:
         rho_v = 0.01 #pc_nn.loc[T_val, "rho_v"]
 
         # rho_init = (torch.sigmoid((mesh["x"]+a))*torch.sigmoid(-(mesh["x"]-a))*(rho_l - rho_v) + rho_v)[None, None, ...].to(device).double() 
-        rho_init = 0.000001*(torch.sigmoid(10*(mesh["x"]+L))*torch.sigmoid(-10*(mesh["x"]-a))*(rho_l - rho_v) + rho_v)[None, None, ...].to(device).double() 
+        rho_init = 0.000001*(torch.sigmoid(10*(mesh["x"]+L))*torch.sigmoid(-10*(mesh["x"]-a))*(rho_l - rho_v) + rho_v)[None, None, ...].to(device=device, dtype=TORCH_DTYPE) 
 
         target_density = 25/(2*L)
-        N_start = rho_init.sum(-1)*mesh["dx"]*20**2
+        N_start = rho_init.sum(-1)*mesh["dx"]*ContactArea
 
         result = run_evaluation(
                                     T_val, 
@@ -313,4 +316,4 @@ for N_val in N_vals:
         df_new = pd.concat([data, df_new])
         isotherm_path = os.path.join(pkldir, f"isotherm_profiles_wl_{WALL}.pkl")
         ensure_plot_dir(isotherm_path)
-        df_new.to_pickle(isotherm_path)
+        tensors_to_cpu_for_storage(df_new).to_pickle(isotherm_path)

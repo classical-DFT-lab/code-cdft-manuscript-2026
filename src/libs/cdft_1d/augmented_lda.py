@@ -86,7 +86,6 @@ def CDFT_MODEL(eq_params, mesh, sol):
                                         grad_outputs=[torch.ones_like(rho),],
                                         create_graph=True,  
                                         materialize_grads=True)[0]  # (B, 1, Nx)
-
             return DFR, DFA
 
 
@@ -141,4 +140,73 @@ def CDFT_MODEL(eq_params, mesh, sol):
             return out
 
 
+
+        # BULK --------------------------------------------------------------------------------
+        def DF_auto_bulk(self, rho):
+            """
+            Computes F_ex's gradients using backpropagation.
+            """
+
+            if self.sol["USE_MODEL"]:
+                self.eq_params["pred_dnn"] = self.dnn_fn(self.eq_params["beta"])#.double())  # [B, 1]
+                self.eq_params["sigma_attr"] = 1. + 0.01*self.eq_params["pred_dnn"][...,0:1]  #[B, 1] 
+                self.eq_params["eps_attr"] =   1. + 0.01*self.eq_params["pred_dnn"][...,1:2]  #[B, 1]
+
+            # REPULSIVE
+            phiR = self.phiR_bulk(rho)   # (B, 1,)
+            #                                     (B, 1, )
+            DFR = torch.autograd.grad(  outputs = [phiR * self.mesh["dx"] / self.mesh["dx"],],
+                                        inputs=rho,  # (B, 1,)
+                                        grad_outputs=[torch.ones_like(rho),],  # (B, 1,)
+                                        create_graph=True,  # len(grad_output) x (B, 1,)
+                                        materialize_grads=True)[0]  # (B, 1,)
+
+            # ATTRACTIVE
+            phiA = self.phiA_bulk(rho)  # shape (B, 1,)
+            DFA = torch.autograd.grad(  outputs = [phiA * self.mesh["dx"] / self.mesh["dx"],],
+                                        inputs=rho,  # (B, 1,)
+                                        grad_outputs=[torch.ones_like(rho),],
+                                        create_graph=True,  
+                                        materialize_grads=True)[0]  # (B, 1,)
+
+            return DFR, DFA
+
+        # MAIN OUTPUT: gradients_FX --> It allows the computation of the derivatives of the FREE ENERGY
+        def gradients_FX_bulk(self,
+                        rho_guess,
+                        detach_tensors,
+                        compute_D2FX,
+                        ):
+            """
+            gradients_FX: uses vectorized autodiff to compute the functional derivative and hessian of the excess free-energy functional FX
+            wrt rho.
+            
+            It returns a dict out with keys:
+              - "DF":      functional derivative of Fx
+              - "D2F":     functional hessian of FX (Optional)
+            """
+            # ----------------------------------------------------------------
+            out = {}
+            with torch.enable_grad():
+                # Setup
+                rho = rho_guess.requires_grad_(True)  # (BS, 1)
+                DFR, DFA = self.DF_auto_bulk(rho)  # (BS, 1), (BS, 1)
+                DF = DFR + DFA  # (BS,1)
+
+
+                if self.sol["JACOBIAN"] == "EXACT": DF_input = [DFR, DFA]
+                elif self.sol["JACOBIAN"] == "STABLE": DF_input = [DFR/self.mesh["dx"], DFA]
+                else: raise ValueError("Must specify Jacobian computation method")
+
+                # JACOBIAN D2F: dF/(drho(x)drho(y)) --------------------------------
+                if compute_D2FX:
+                    D2F = torch.autograd.grad(  outputs = [DF_input * self.mesh["dx"] / self.mesh["dx"],],
+                                        inputs=rho,  # (B, 1,)
+                                        grad_outputs=[torch.ones_like(rho),],
+                                        create_graph=True,  
+                                        materialize_grads=True)[0]  # (B, 1,)
+                      # (B, 1)
+                    out["D2F"] = D2F 
+            out["DF"] = DF
+            return out
     return LDA_HardSpheres(eq_params, mesh, sol)

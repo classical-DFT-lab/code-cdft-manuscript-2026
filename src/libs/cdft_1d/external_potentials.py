@@ -41,5 +41,5 @@ def LJ126(x, x_wall, Ew, sigmaw):
     return Vext
 
 def HW(x, x_wall, Ew=None, sigmaw=None):
-    Vext = ((x < x_wall).double()*1e6)  [None, :]
+    Vext = ((x < x_wall).to(dtype=x.dtype) * 1e6)[None, :]
     return Vext

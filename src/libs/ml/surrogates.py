@@ -1,8 +1,8 @@
 import torch
 from torch import nn
 
-
 from libs.ml.wda import WDA1d
+from libs.utils import sol_dtype
 
 
 def load_ml_state_dicts(datadir, device):
@@ -21,17 +21,17 @@ def load_ml_state_dicts(datadir, device):
 
 
 class DNN(nn.Module):
-    def __init__(self, input_dim=1, output_dim=3, hidden_dim=8, num_layers=3):
+    def __init__(self, input_dim=1, output_dim=3, hidden_dim=8, num_layers=3, dtype=torch.float64):
         super().__init__()
         layers = []
-        layers.append(nn.Linear(input_dim, hidden_dim).double())
+        layers.append(nn.Linear(input_dim, hidden_dim).to(dtype=dtype))
         layers.append(nn.GELU())
 
         for _ in range(num_layers - 1):
-            layers.append(nn.Linear(hidden_dim, hidden_dim).double())
+            layers.append(nn.Linear(hidden_dim, hidden_dim).to(dtype=dtype))
             layers.append(nn.GELU())
 
-        layers.append(nn.Linear(hidden_dim, output_dim))
+        layers.append(nn.Linear(hidden_dim, output_dim).to(dtype=dtype))
         self.net = nn.Sequential(*layers)
 
     #@torch.compile
@@ -40,17 +40,17 @@ class DNN(nn.Module):
 
 
 class DNNRep(nn.Module):
-    def __init__(self, input_dim, output_dim, hidden_dim, num_layers):
+    def __init__(self, input_dim, output_dim, hidden_dim, num_layers, dtype=torch.float64):
         super().__init__()
         layers = []
-        layers.append(nn.Linear(input_dim, hidden_dim).double())
+        layers.append(nn.Linear(input_dim, hidden_dim).to(dtype=dtype))
         layers.append(nn.GELU())
 
         for _ in range(num_layers - 1):
-            layers.append(nn.Linear(hidden_dim, hidden_dim).double())
+            layers.append(nn.Linear(hidden_dim, hidden_dim).to(dtype=dtype))
             layers.append(nn.GELU())
 
-        layers.append(nn.Linear(hidden_dim, output_dim))
+        layers.append(nn.Linear(hidden_dim, output_dim).to(dtype=dtype))
         self.net = nn.Sequential(*layers)
     
     def forward(self, x): #in: (B, 1, Nx) 
@@ -59,18 +59,21 @@ class DNNRep(nn.Module):
         x_out = torch.einsum("biu->bui", x_out_)  # (B, 1, Nx)
         return x_out
     
-def setDNN(dft_model, LR, state_dicts=None):
+def setDNN(dft_model, LR, weight_decay=0.0, state_dicts=None):
     """
     Args:
         dft_model: CDFT model to attach DNN surrogates to
         LR: learning rate (unused when not training)
+        weight_decay: Adam L2 penalty for dnn_fn and dnn_g_fn parameters
         state_dicts: optional dict with 'dnn_fn' and 'dnn_g_fn' keys; if provided, use instead of loading from disk
     """
     B = dft_model.mesh["BS"]
-    dnn_fn = DNN(input_dim=1, output_dim=6, hidden_dim=24, num_layers=6).double().to(dft_model.sol["device"])
-    dnn_g_fn = DNN(input_dim=1, output_dim=1, hidden_dim=24, num_layers=6).double().to(dft_model.sol["device"])
-    dft_model.dnn_fn = torch.jit.trace(dnn_fn, torch.zeros([B, 1], dtype=torch.double, device=dft_model.sol["device"]))
-    dft_model.dnn_g_fn = torch.jit.trace(dnn_g_fn, torch.zeros([B, 1], dtype=torch.double, device=dft_model.sol["device"]))
+    dt = sol_dtype(dft_model.sol)
+    dev = dft_model.sol["device"]
+    dnn_fn = DNN(input_dim=1, output_dim=6, hidden_dim=24, num_layers=6, dtype=dt).to(dev)
+    dnn_g_fn = DNN(input_dim=1, output_dim=1, hidden_dim=24, num_layers=6, dtype=dt).to(dev)
+    dft_model.dnn_fn = torch.jit.trace(dnn_fn, torch.zeros([B, 1], dtype=dt, device=dev))
+    dft_model.dnn_g_fn = torch.jit.trace(dnn_g_fn, torch.zeros([B, 1], dtype=dt, device=dev))
 
     # Optimizer for DNN model --------------
     dft_model.optimizer_dnn = torch.optim.Adam(
@@ -78,7 +81,7 @@ def setDNN(dft_model, LR, state_dicts=None):
                                                     {"params": dft_model.dnn_fn.parameters(), "lr": LR},
                                                     {"params": dft_model.dnn_g_fn.parameters(), "lr": 0.1*LR},
                                                 ],
-                                                weight_decay=0*1e-5,
+                                                weight_decay=weight_decay,
                                               )
     
     #Scheduler - ExpDecay
@@ -93,23 +96,27 @@ def setDNN(dft_model, LR, state_dicts=None):
         dft_model.dnn_g_fn.load_state_dict(torch.load(dft_model.sol["datadir"] + "ml_model/ml_dicts/dnn_g_fn.dict", map_location=dft_model.sol["device"]))
 
 
-def setDNNRep(dft_model, LR, state_dict=None):
+def setDNNRep(dft_model, LR, weight_decay=0.0, state_dict=None):
     """
     Args:
         dft_model: CDFT model to attach DNNRep surrogate to
         LR: learning rate (unused when not training)
+        weight_decay: Adam L2 penalty for dnn_rep_fn parameters
         state_dict: optional pre-loaded state dict; if provided, use instead of loading from disk
     """
     B = dft_model.mesh["BS"]
     Nx = dft_model.mesh["Nx"]
-    dnn_rep_fn = DNNRep(input_dim=2, output_dim=1, hidden_dim=24, num_layers=6).double().to(dft_model.sol["device"])
-    dft_model.dnn_rep_fn = torch.jit.trace(dnn_rep_fn, torch.zeros([B, 2, Nx], dtype=torch.double, device=dft_model.sol["device"]) )
+    dt = sol_dtype(dft_model.sol)
+    dev = dft_model.sol["device"]
+    dnn_rep_fn = DNNRep(input_dim=2, output_dim=1, hidden_dim=24, num_layers=6, dtype=dt).to(dev)
+    dft_model.dnn_rep_fn = torch.jit.trace(dnn_rep_fn, torch.zeros([B, 2, Nx], dtype=dt, device=dev))
 
     # Optimizer for DNN model --------------
-    dft_model.optimizer_dnn_rep = torch.optim.Adam(dft_model.dnn_rep_fn.parameters(), 
-                                              lr=LR, 
-                                              weight_decay=0*1e-5,
-                                              )
+    dft_model.optimizer_dnn_rep = torch.optim.Adam(
+        dft_model.dnn_rep_fn.parameters(),
+        lr=LR,
+        weight_decay=weight_decay,
+    )
     
     #Scheduler - ExpDecay
     dft_model.scheduler_dnn_rep = torch.optim.lr_scheduler.ExponentialLR(dft_model.optimizer_dnn_rep, gamma=0.95)        
@@ -122,6 +129,7 @@ def setDNNRep(dft_model, LR, state_dict=None):
 
 
 def setWDA(dft_model, LR,
+            weight_decay=0.0,
             in_dim = 1,
             out_dim = 1,
             modes = 100,
@@ -133,17 +141,20 @@ def setWDA(dft_model, LR,
             ):
     """
     Args:
+        weight_decay: Adam L2 penalty for wda_fn parameters
         state_dict: optional pre-loaded state dict for wda_fn; if provided, use instead of loading from disk
     """
+    dt = sol_dtype(dft_model.sol)
     dft_model.wda_fn = WDA1d(
-        in_dim, out_dim, modes, width, num_blocks, dft_model.mesh, activation, use_bias
-        ).double().to(dft_model.sol["device"])
+        in_dim, out_dim, modes, width, num_blocks, dft_model.mesh, activation, use_bias, dtype=dt
+        ).to(dtype=dt, device=dft_model.sol["device"])
 
     # Optimizer for FNO model --------------
-    dft_model.optimizer_fno = torch.optim.Adam(dft_model.wda_fn.parameters(), 
-                                              lr=LR, 
-                                              weight_decay=0*1e-5,
-                                              )
+    dft_model.optimizer_fno = torch.optim.Adam(
+        dft_model.wda_fn.parameters(),
+        lr=LR,
+        weight_decay=weight_decay,
+    )
     
     #Scheduler - ExpDecay
     dft_model.scheduler_fno = torch.optim.lr_scheduler.ExponentialLR(dft_model.optimizer_fno, gamma=0.95)        

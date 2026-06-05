@@ -6,11 +6,13 @@ def LossL2(U_fwd, U_data):
     """
     return torch.mean(torch.abs(U_fwd - U_data)**2) / torch.mean(torch.abs(U_data)**2)
 
+
 def LossL1(U_fwd, U_data):
     """
     Loss function to compute the loss between the forward solution and the target data.
     """
     return torch.mean(torch.abs(U_fwd - U_data)) / torch.mean(torch.abs(U_data))
+
 
 def SpectralLoss(U_fwd, U_data):
     pred_f = torch.fft.rfft(U_fwd, dim=1)
@@ -19,3 +21,15 @@ def SpectralLoss(U_fwd, U_data):
     # freq_weights = torch.linspace(1., 1.5, pred_f.shape[-1])[None,:]  # Emphasize higher frequencies
     freq_weights = 1.  # Dont emphasize higher frequencies
     return torch.mean(torch.square(pred_f - target_f)* (freq_weights))# / (torch.mean(U_data**2))
+
+
+def LossGradL2(U_fwd, U_data):
+    """
+    Loss function to compute the loss between the forward solution and the target data.
+    """
+    dU_fwd = U_fwd[..., 1:] - U_fwd[..., :-1]
+    dU_data = U_data[..., 1:] - U_data[..., :-1]
+
+    Loss1 = torch.mean(torch.abs(U_fwd - U_data)**2) / torch.mean(torch.abs(U_data)**2)
+    Loss2 = torch.mean(torch.abs(dU_fwd - dU_data)**2) / torch.mean(torch.abs(U_data)**2)
+    return Loss1 + Loss2

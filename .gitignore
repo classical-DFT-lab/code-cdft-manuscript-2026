@@ -11,18 +11,16 @@ ncdft2.zip
 src/**/*.pkl
 src/**/*.log
 src/**/*.out
-src/deprecated
-src/bulk_tmd.py
-src/eval_lg.py
-src/eval_wl.py
-src/interpolant.ipynb
-src/isotherm_lg.ipynb
-src/minOmega.py
 src/**/*.pyc
+src/**/*.ipynb
+src/deprecated
 
 data/ml_model/ml_dicts0
 data/ml_model/ml_dicts1
 data/ml_model/intermediate_models
+data/dataset/md_planar_wc/local
+data/dataset/pkl/bulk_tmd/** 
+output/**
 
 !output/**/.gitkeep
 !data/**/.gitkeep

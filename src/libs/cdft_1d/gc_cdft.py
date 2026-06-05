@@ -119,7 +119,9 @@ class CDFT():
 
         if compute_Jac: 
             Jac_op = (
-                torch.eye(rho_h0.shape[-1], device=rho_h0.device)[None,None, ...]  # (B, 1, Nx, Nx)
+                torch.eye(
+                    rho_h0.shape[-1], device=rho_h0.device, dtype=rho_h0.dtype
+                )[None, None, ...]  # (B, 1, Nx, Nx)
                 + 
             #   (B, 1) x                (B, 1, Nx, 1) x    (B, 1, Nx, Nx)   (,)          
                 beta[...,None, None] *  rho_h0[...,None] * dx

@@ -1,11 +1,13 @@
 import torch
 
+from libs.utils import sol_dtype
+
 
 class REPULSIVE_FREE_ENERGY():
     def __init__(self):
         
         R = self.eq_params["R"]
-        a = torch.tensor(6)/(torch.pi*(R)**3)
+        a = torch.tensor(0.996*6)/(torch.pi*(R)**3)
         self.eq_params["a"] = a[None] # (1,)
 
 
@@ -95,8 +97,48 @@ class REPULSIVE_FREE_ENERGY():
         return psi_rep
 
     def bh_diameter(self):
-        grid = torch.linspace(0, 1**(1/6), 100, dtype=torch.double, device=self.sol["device"])
+        grid = torch.linspace(0, 1**(1/6), 100, dtype=sol_dtype(self.sol), device=self.sol["device"])
         dgrid = grid[1]-grid[0]
         u = self.psi_rep(grid)[None,None,:] # (B, 1, Ng)
         f = 1 - torch.exp(-self.eq_params["beta"][...,None]*u)
         return f.sum(-1) * dgrid
+
+
+
+
+    def phiR_bulk(self, rho):
+        use_dbh = self.sol.get("USE_DBH_DIAMETER", False)
+        if self.sol["USE_MODEL"]:
+            if use_dbh:
+                dbh = self.bh_diameter()  # (B,1)
+                C = self.eq_params["pred_dnn"][...,3:4]
+                a = self.eq_params["a"] * (1 + 1e-3*C) / dbh**3  # (B,1)
+            else:
+                a = self.eq_params["a"]    # (B,1)
+        else:
+            dbh = self.bh_diameter()  # (B,1)
+            a = self.eq_params["a"][None,...] / dbh**3  # (1,1)
+        beta = self.eq_params["beta"]  # (B,1)
+
+        corr = rho
+
+        n = [
+            corr / a[...] 
+            ]  # [(B, 1)]
+
+        # Compute list of inputs for phi:        
+        phiR_0 = ( 
+                    (a / beta)  # (B, 1,)
+                    *
+                #n[0] * (3 - 2*n[0]) / (1 - n[0])**2
+                n[0]**2 * (4 - 3*n[0]) / (1 - n[0])**2  # (B, 1,)
+                )  # (B, 1, Nx)
+
+
+        if self.sol["USE_MODEL"]:
+            inputs = torch.cat([n[0][...,None], beta[...,None].expand(*(-1,)*len(beta.shape), rho.shape[-1]) ], dim=-2, )
+            phi_corr = self.dnn_rep_fn(inputs)
+            phiR = phiR_0*(1. + 0.01*phi_corr[:,0:1,0]) #+ phi_corr[:,1:2,:] 
+        else:
+            phiR = phiR_0
+        return phiR  # (BS, 1)

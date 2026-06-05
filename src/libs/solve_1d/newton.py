@@ -31,10 +31,11 @@ def newton(model,
 
         res = out_k["res"]
         Jac_op = out_k["Jac_op"]
-        
         # Solve linear system Jac_op * delta_rho = -res
         # -> delta_rho = - Jac_op^-1 * res
-        delta_U = torch.linalg.solve(Jac_op, -res)
+        # RHS must be (..., n, k) per torch.linalg.solve; keep Jac_op (BS, 1, Nx, Nx), res (BS, 1, Nx).
+        rhs = (-res).unsqueeze(-1)  # (BS, 1, Nx, 1)
+        delta_U = torch.linalg.solve(Jac_op, rhs).squeeze(-1)  # (BS, 1, Nx)
         delta_U_norm = torch.abs(delta_U).mean().item()
 
         U_new = torch.maximum(U_old + delta_U*alpha, torch.zeros_like(U_old))

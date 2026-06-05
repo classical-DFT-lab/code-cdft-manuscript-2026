@@ -8,7 +8,6 @@ from tqdm import tqdm
 
 import torch
 
-import libs.thermodynamics as tmd
 from libs.cdft_1d.augmented_lda import CDFT_MODEL as CDFT
 from libs.cdft_1d.external_potentials import LJ126, LJ93, LJ71, HW
 from libs.solve_1d.continuation_gpu import continuation
@@ -16,9 +15,10 @@ from libs.solve_1d.picard import picard
 from libs.solve_1d.newton import newton
 from libs.solve_1d.adjoint import adjoint
 
-from libs.ml.surrogates import setDNN, setDNNRep, setWDA
+from libs.ml.surrogates import setDNN, setDNNRep, setWDA, load_ml_state_dicts
 from libs.ml.dataset_pd import setDatasetObject
-from libs.ml.loss import LossL1, LossL2, SpectralLoss
+from libs.ml.loss import LossL1, LossL2, SpectralLoss, LossGradL2
+from libs.thermodynamics import batched_coexistence_temperatures
 from libs.utils import *
 from libs.io_utils import load_pickle, DataNotFoundError
 
@@ -26,11 +26,17 @@ import matplotlib.pyplot as plt
 plt.rcParams["text.usetex"] = True
 
 import os
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-if device==torch.device("cuda"): 
+# Compute backend: "auto" | "cuda" | "mps" | "cpu". Override: export TORCH_DEVICE=mps
+os.environ["CUDA_VISIBLE_DEVICES"] = "2" 
+DEVICE_KIND = "cuda"
+device = resolve_training_device(DEVICE_KIND)
+if device.type == "cuda":
     torch.backends.cudnn.benchmark = True
-    print("Available devices:", torch.cuda.device_count())
+    print("Available CUDA devices:", torch.cuda.device_count())
 print(f"Using device: {device}")
+# Floating-point dtype for grids, parameters, and ML (torch.float64 or torch.float32).
+# Apple MPS often works best with torch.float32.
+TORCH_DTYPE = torch.float32
 torch.manual_seed(42)  # For reproducibility
 
 
@@ -44,7 +50,7 @@ os.makedirs(plotdir, exist_ok=True)
 os.makedirs(plotdir_rho, exist_ok=True)
 
 # Wall type: "wn2" or "wc" (sets pkldir and Vext params)
-WALL = "wn2"
+WALL = "wc"
 if WALL == "wn2":
     pkldir = os.path.join(datadir, "dataset", "pkl", "profiles_wl_wn2") + os.sep
 elif WALL == "wc":
@@ -57,11 +63,11 @@ ml_intermediate_dir = os.path.join(datadir, "ml_model", "intermediate_models")
 os.makedirs(ml_dicts_dir, exist_ok=True)
 os.makedirs(ml_intermediate_dir, exist_ok=True)
 USE_MODEL = 1
-USE_DBH_DIAMETER = 0  # 1: use Barker-Henderson diameter scaling when USE_MODEL
+USE_DBH_DIAMETER = 1  # 1: use Barker-Henderson diameter scaling when USE_MODEL
 TRAIN_DNN = 1
 TRAIN_DNN_REP = 1
 TRAIN_WDA = 1
-RESTART_ML_MODEL = 1
+RESTART_ML_MODEL = 0
 SAVE_MODEL = 1
 SAVE_INTERMEDIATE_MODELS = 0
 JACOBIAN = "EXACT"
@@ -95,7 +101,7 @@ Lambda      = 1. #np.sqrt(h_p**2 * beta / (2*np.pi*m))
 
 # 2 // SOLVERS: Parameter for the DFT Model solvers
 newton_max_steps = 1600
-newton_tol = 1e-7
+newton_tol = 5e-7
 newton_alpha = 0.9
 newton_verbose = 0
  
@@ -123,11 +129,11 @@ cutoff_wall = 10. * R
 
 # 5 // Mesh: Spatial Discretization
 L           = 30.
-xmin, xmax  = -L, L
-Nx          = int(2*L/(0.125*R))
+xmin, xmax  = 0., 2*L
+Nx          = int(2*L/(0.1*R))
 BS          = 5
 x_bc        = [xmin, xmax]
-x           = torch.linspace(xmin, xmax, Nx, dtype=torch.double).to(device)
+x           = torch.linspace(xmin, xmax, Nx, dtype=TORCH_DTYPE).to(device)
 x_wall      = (xmin - 0.001*sigmaw)
 dx          = x[1] - x[0]
 print(f"dx = {dx.item():.4f} , Nx = {Nx}\n\n")
@@ -151,16 +157,18 @@ target_density = 0.2798
 
 
 # 8 // Guess solution
-rho_guess   = torch.zeros((BS, 1, Nx), dtype=torch.double).to(device)  # [B, 1, Nx]
+rho_guess   = torch.zeros((BS, 1, Nx), dtype=TORCH_DTYPE).to(device)  # [B, 1, Nx]
 #(Vext*0.) + Lambda**(-3) * torch.exp(beta*(torch.tensor(mu)))*0 # [B, 1, Nx]
 
 
 
 # 9 // ML
-lr = 1e-4
+lr = 0.95e-3
+#weight_decay = 0.5e-7  # Adam L2 penalty for dnn_fn, dnn_g_fn, dnn_rep_fn, wda_fn
+weight_decay = 0.1e-7  # Adam L2 penalty for dnn_fn, dnn_g_fn, dnn_rep_fn, wda_fn
 epochs = 10000
 train_T = [0.55, 0.65, 0.75, 0.85, 0.95]
-# train_T = [0.55, ]
+#train_T = [0.55, ]
 good_N = [8000]
 
 
@@ -168,18 +176,18 @@ good_N = [8000]
 # ------------------------------------------------------------------------------
 # ------------------------------------------------------------------------------
 eq_params = {
-    "R": torch.tensor(R).to(device),
-    "mu": torch.tensor(mu).to(device)[None, None],  # [B, 1]
-    "beta": torch.tensor(beta).to(device)[None, None],  # [B, 1]
-    "Lambda": torch.tensor(Lambda).to(device),
+    "R": torch.tensor(R, dtype=TORCH_DTYPE, device=device),
+    "mu": torch.tensor(mu, dtype=TORCH_DTYPE, device=device)[None, None],  # [B, 1]
+    "beta": torch.tensor(beta, dtype=TORCH_DTYPE, device=device)[None, None],  # [B, 1]
+    "Lambda": torch.tensor(Lambda, dtype=TORCH_DTYPE, device=device),
     "dft_type": dft_type,
     "ensemble": ensemble,
     "str_param": str_param,
-    "sigma_attr": torch.tensor(sigma_attr).to(device),
-    "eps_attr": torch.tensor(eps_attr).to(device),
-    "cutoff_attr": torch.tensor(cutoff_attr).to(device),
-    "Ew": torch.tensor(Ew).to(device),
-    "sigmaw": torch.tensor(sigmaw).to(device),
+    "sigma_attr": torch.tensor(sigma_attr, dtype=TORCH_DTYPE, device=device),
+    "eps_attr": torch.tensor(eps_attr, dtype=TORCH_DTYPE, device=device),
+    "cutoff_attr": torch.tensor(cutoff_attr, dtype=TORCH_DTYPE, device=device),
+    "Ew": torch.tensor(Ew, dtype=TORCH_DTYPE, device=device),
+    "sigmaw": torch.tensor(sigmaw, dtype=TORCH_DTYPE, device=device),
     "Vext": Vext,
     "BC_R": BC_R,
 }
@@ -189,14 +197,15 @@ mesh = {
     "L": L,
     "Nx": Nx,
     "x_bc": [xmin, xmax],
-    "x": torch.linspace(xmin, xmax, Nx, dtype=torch.double).to(device),
-    "x_wall": torch.tensor(x_wall).to(device),
+    "x": torch.linspace(xmin, xmax, Nx, dtype=TORCH_DTYPE).to(device),
+    "x_wall": torch.tensor(x_wall, dtype=TORCH_DTYPE, device=device),
     "dx": dx.to(device),
 }
 
 sol = {
     "rho_guess": rho_guess.to(device),
     "device": device,
+    "dtype": TORCH_DTYPE,
     "outdir": outdir,
     "datadir": datadir,
     "pkldir": pkldir,
@@ -209,7 +218,7 @@ sol = {
     "TRAIN_DNN_REP": TRAIN_DNN_REP,
     "TRAIN_WDA": TRAIN_WDA,
     "JACOBIAN": JACOBIAN,
-    "LOSS": LossL2,  # LossL2, LossL1 or SpectralLoss
+    "LOSS": LossGradL2,  # LossL2, LossL1, LossGradL2 or SpectralLoss
 }
 
 
@@ -238,9 +247,9 @@ data_md, dataloader_md = setDatasetObject(
 
 # ------------------------------------------------------------------------------
 # Instantiate ML Models -------------------------------------------
-setDNN(model, LR=lr)
-setDNNRep(model, LR=lr)
-setWDA(model, LR=lr, modes=150)
+setDNN(model, LR=lr, weight_decay=weight_decay)
+setDNNRep(model, LR=lr, weight_decay=weight_decay)
+setWDA(model, LR=lr, modes=150, weight_decay=weight_decay)
 
 if not TRAIN_DNN:
     model.dnn_fn.eval()
@@ -262,27 +271,73 @@ if not TRAIN_WDA:
 
 # ------------------------------------------------------------------------------
 # Initialize the guess solution pandas DataFrame
+ml_state_dicts = load_ml_state_dicts(datadir, device) if RESTART_ML_MODEL else None
+
 if RESTART_ML_MODEL:
     U_guess_df = load_pickle(
         os.path.join(ml_dicts_dir, "U_guess.pkl"),
         description="U_guess (restart file)",
         hint="Train from scratch with RESTART_ML_MODEL=0, or ensure a previous run saved U_guess.pkl.",
     )
-    U_guess_df[['rho', 'x']] = U_guess_df[['rho', 'x']].map(
-        lambda arr: torch.tensor(arr, dtype=torch.double, device=model.sol["device"])
+    U_guess_df[['rho', 'x']] = dataframe_elementwise_map(
+        U_guess_df[['rho', 'x']],
+        lambda arr: torch.tensor(arr, dtype=model.sol["dtype"], device=model.sol["device"]),
     )
-else:
+elif 1:
     # df_0 is initial reference MF LDA solution DataFrame with MultiIndex (N, T)
     U_guess_df = data_md.df_0.copy()[['rho', "x"]]   # Guess solution from LDA MF
-    # U_guess_df = data_md.df_md.copy()[['rho', "x"]]   # Guess solution MD
+    #U_guess_df = data_md.df_md.copy()[['rho', "x"]]   # Guess solution MD
     U_guess_df = U_guess_df.reset_index().set_index(['N', 'T']).sort_index()
-    U_guess_df[['rho', 'x']] = U_guess_df[['rho', 'x']].applymap(
-        lambda arr: torch.tensor(arr, dtype=torch.double, device=model.sol["device"])
+    U_guess_df[['rho', 'x']] = dataframe_elementwise_map(
+        U_guess_df[['rho', 'x']],
+        lambda arr: torch.tensor(arr, dtype=model.sol["dtype"], device=model.sol["device"]),
+    )
+else:
+    rho_v_b, rho_l_b = batched_coexistence_temperatures(
+        T_list=train_T,
+        eq_params=eq_params,
+        sol=sol,
+        ml_state_dicts=ml_state_dicts,
+        use_model=sol["USE_MODEL"],
+        rho_init_pair=(1e-8, 1.0 - 1e-8),
+        tol=1e-5,
+        max_iter=100000,
+        alpha=0.8,
+        chunk_size=len(train_T),
+        verbose=True,
     )
 
+    # Build one initial profile per training temperature
+    a = ((good_N[0] - (xmax - xmin) * rho_v_b) / (rho_l_b - rho_v_b))[:, None, None]
 
+    rho_init_full = (
+        torch.sigmoid(2 * (mesh["x"][None, None, :] - (xmin + 1.0)))
+        * (rho_l_b[:, None, None] - rho_v_b[:, None, None])
+        * torch.sigmoid(-2 * (mesh["x"][None, None, :] - a))
+        + rho_v_b[:, None, None]
+    ).to(device=device, dtype=TORCH_DTYPE)  # (len(train_T), 1, Nx)
+
+    # Homogenize with the other branches: create U_guess_df with columns ["rho", "x"]
+    U_guess_records = []
+    x_profile = mesh["x"][None, :].to(device=device, dtype=TORCH_DTYPE)  # (1, Nx)
+
+    for i, T_val in enumerate(train_T):
+        U_guess_records.append(
+            {
+                "N": good_N[0],
+                "T": T_val,
+                "rho": rho_init_full[i, 0].clone(),   # (Nx,)
+                "x": x_profile[0].clone(),            # (Nx,)
+            }
+        )
+
+    U_guess_df = pd.DataFrame(U_guess_records).set_index(["N", "T"]).sort_index()
+
+
+U_guess_df = normalize_profiles_nt_multiindex(U_guess_df)
+    
 for idx, row in U_guess_df.iterrows():
-    x_src = row['x']                # torch tensor (Nx,)
+    x_src = row['x']            # torch tensor (Nx,)
     rho_src = row['rho'].squeeze() # torch tensor (Nx,) or (1, Nx)
     
     rho_interp = data_md.interpolate_rho(
@@ -293,24 +348,23 @@ for idx, row in U_guess_df.iterrows():
 
     U_guess_df.at[idx, 'rho'] = rho_interp
     U_guess_df.at[idx, 'x'] = model.mesh["x"]
-print("Initialized guess for the training set: ",U_guess_df.head())
+
+
 
 
 def update_U_guess_df(U_guess_df, batch, new_rho):
     # new_rho: tensor of shape [B, 1, Nx]
     for i in range(new_rho.size(0)):
-        T = batch['T'][i].item()
-        N_val = int(batch['N'][i].item())
-        U_guess_df.at[(N_val, T), 'rho'] = new_rho[i,...]
+        N_val, T_key = profile_nt_index_key(batch['N'][i].item(), batch['T'][i].item())
+        U_guess_df.at[(N_val, T_key), 'rho'] = new_rho[i, ...]
 
 def get_rho_from_U_guess_df(U_guess_df, batch):
     rho_list = []
 
     for i in range(batch['rho'].shape[0]):
-        T = round(batch['T'][i].item(), 6)
-        N_val = int(batch['N'][i].item())
+        N_val, T_key = profile_nt_index_key(batch['N'][i].item(), batch['T'][i].item())
 
-        rho_val = U_guess_df.at[(N_val, T), 'rho']  # shape: (1, Nx) or (Nx,)
+        rho_val = U_guess_df.at[(N_val, T_key), 'rho']  # shape: (1, Nx) or (Nx,)
         
         # Ensure correct shape (1, Nx)
         if rho_val.ndim == 1:
@@ -320,6 +374,29 @@ def get_rho_from_U_guess_df(U_guess_df, batch):
 
     # Stack to shape: (B, 1, Nx)
     return torch.stack(rho_list, dim=0)
+
+for idx, row in U_guess_df.iterrows():
+    N_val, T_key = profile_nt_index_key(idx[0], idx[1])
+    x_g = row["x"]
+    rho_g = row["rho"].squeeze()
+    if x_g.ndim > 1:
+        x_g = x_g.flatten()
+    if rho_g.ndim > 1:
+        rho_g = rho_g.flatten()
+    plt.figure()
+    #plt.plot(data_md.df_0.copy()[(N_val, T_key), "x"].cpu().numpy(), data_md.df_0.copy()[(N_val, T_key), "rho"].cpu().numpy(), color="C0", label=r"$U_{\mathrm{guess}}$ init")
+    plt.plot(x_g.cpu().numpy(), rho_g.cpu().detach().numpy(), color="C0", label=r"$U_{\mathrm{guess}}$ init")
+    plt.xlabel(r"$x$")
+    plt.ylabel(r"$\rho$")
+    plt.title(rf"Initial guess $U_{{\mathrm{{guess}}}}$ (N={N_val}, T={T_key})")
+    plt.legend()
+    plt.grid()
+    plt.savefig(
+        os.path.join(plotdir_rho, f"U_guess_init_N{N_val:.2f}_T_{T_key:.2f}.png")
+    )
+    plt.close()
+print("Initialized guess for the training set:", U_guess_df.head())
+print(f"Wrote U_guess init figure(s) under {plotdir_rho}")
 
 # ------------------------------------------------------------------------------
 # ----------------------------- TRAINING LOOP ----------------------------------
@@ -370,6 +447,9 @@ for epoch in range(epochs):
         # ---------------------------------------------------------------- #
         # FORWARD PROBLEM
         rho_guess = get_rho_from_U_guess_df(U_guess_df, batch)  # [B, 1, Nx]        
+        #print(rho_guess)
+        if epoch==0 and 0: sol["JACOBIAN"] = "STABLE"
+        else: sol["JACOBIAN"] = "EXACT"
         out_fwd = newton(
                     model=model,
                     U_guess=rho_guess, #U_guess_dict[beta_val] ,
@@ -401,7 +481,7 @@ for epoch in range(epochs):
         k = torch.linspace(0.1, 10, len(w_real), device=w_real.device)
         var =  (1/k)**2
         
-        loss_prior_wda = 1e-6*((w_real**2 + w_imag**2) / var).mean()
+        loss_prior_wda = weight_decay*((w_real**2 + w_imag**2) / var).mean()
 
         # Adjoint
         grad_adjoint = (outA["grad"] ).mean() 
@@ -447,33 +527,33 @@ for epoch in range(epochs):
     # loglossepoch_history.append(sum(logloss_history[:-n_batches])/n_batches)
 
     
+    model.optimizer_dnn.step()
+    model.optimizer_dnn_rep.step()
+    model.optimizer_fno.step()
 
     # Scheduler
     if (100*epoch/epochs)%10==0: model.scheduler_dnn.step()
     if (100*epoch/epochs)%10==0: model.scheduler_dnn_rep.step()
     if (100*epoch/epochs)%10==0: model.scheduler_fno.step()
 
-    model.optimizer_dnn.step()
-    model.optimizer_dnn_rep.step()
-    model.optimizer_fno.step()
 
 
     if SAVE_MODEL:
-        torch.save(model.dnn_fn.state_dict(), os.path.join(ml_dicts_dir, "dnn_fn.dict"))
-        torch.save(model.dnn_g_fn.state_dict(), os.path.join(ml_dicts_dir, "dnn_g_fn.dict"))
-        torch.save(model.dnn_rep_fn.state_dict(), os.path.join(ml_dicts_dir, "dnn_rep_fn.dict"))
-        torch.save(model.wda_fn.state_dict(), os.path.join(ml_dicts_dir, "wda_fn.dict"))
+        save_state_dict_cpu(model.dnn_fn.state_dict(), os.path.join(ml_dicts_dir, "dnn_fn.dict"))
+        save_state_dict_cpu(model.dnn_g_fn.state_dict(), os.path.join(ml_dicts_dir, "dnn_g_fn.dict"))
+        save_state_dict_cpu(model.dnn_rep_fn.state_dict(), os.path.join(ml_dicts_dir, "dnn_rep_fn.dict"))
+        save_state_dict_cpu(model.wda_fn.state_dict(), os.path.join(ml_dicts_dir, "wda_fn.dict"))
         with open(os.path.join(ml_dicts_dir, "U_guess.pkl"), 'wb') as file:
-            pickle.dump(U_guess_df, file)
+            pickle.dump(tensors_to_cpu_for_storage(U_guess_df), file)
         if epoch%25==0 and model.sol["SAVE_INTERMEDIATE_MODELS"]:
             inter_dir = os.path.join(ml_intermediate_dir, f"ml_dicts{epoch}")
             os.makedirs(inter_dir, exist_ok=True)
-            torch.save(model.dnn_fn.state_dict(), os.path.join(inter_dir, "dnn_fn.dict"))
-            torch.save(model.dnn_g_fn.state_dict(), os.path.join(inter_dir, "dnn_g_fn.dict"))
-            torch.save(model.dnn_rep_fn.state_dict(), os.path.join(inter_dir, "dnn_rep_fn.dict"))
-            torch.save(model.wda_fn.state_dict(), os.path.join(inter_dir, "wda_fn.dict"))
+            save_state_dict_cpu(model.dnn_fn.state_dict(), os.path.join(inter_dir, "dnn_fn.dict"))
+            save_state_dict_cpu(model.dnn_g_fn.state_dict(), os.path.join(inter_dir, "dnn_g_fn.dict"))
+            save_state_dict_cpu(model.dnn_rep_fn.state_dict(), os.path.join(inter_dir, "dnn_rep_fn.dict"))
+            save_state_dict_cpu(model.wda_fn.state_dict(), os.path.join(inter_dir, "wda_fn.dict"))
             with open(os.path.join(inter_dir, "U_guess.pkl"), 'wb') as file:
-                pickle.dump(U_guess_df, file)
+                pickle.dump(tensors_to_cpu_for_storage(U_guess_df), file)
 
 
 

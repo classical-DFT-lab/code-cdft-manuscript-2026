@@ -22,7 +22,8 @@ class DataNotFoundError(FileNotFoundError):
 
 def load_pickle(path: str, description: str = "", hint: str = "") -> object:
     """
-    Load object from pickle file. Raises DataNotFoundError if file is missing.
+    Load object from pickle file with pandas compatibility handling.
+    Raises DataNotFoundError if file is missing.
 
     Args:
         path: Path to the .pkl file.
@@ -32,16 +33,36 @@ def load_pickle(path: str, description: str = "", hint: str = "") -> object:
     Returns:
         The unpickled object.
     """
+    import pandas as pd
+    
     path = os.path.normpath(path)
-    try:
-        with open(path, "rb") as f:
-            return pickle.load(f)
-    except FileNotFoundError as e:
+    if not os.path.exists(path):
         raise DataNotFoundError(
             path,
             description=description or "Pickle file",
             hint=hint or "Ensure the data file exists in the data/ folder.",
-        ) from e
+        )
+    
+    # Try pandas read_pickle first (handles most compatibility issues)
+    try:
+        return pd.read_pickle(path)
+    except Exception:
+        pass
+    
+    # Fallback to pickle.load with various encoding options
+    for encoding in ['utf-8', 'latin1', None]:
+        try:
+            with open(path, "rb") as f:
+                return pickle.load(f, encoding=encoding, fix_imports=True)
+        except Exception:
+            continue
+    
+    # All attempts failed
+    raise DataNotFoundError(
+        path,
+        description=description or "Pickle file",
+        hint=hint or "File exists but cannot be loaded. Try rebuilding this pickle file.",
+    )
 
 
 def load_torch_jit(path: str, description: str = "", hint: str = "", **kwargs) -> object:
