@@ -19,8 +19,8 @@ Classical density functional theory (cDFT) & learned functionals for fluids.
 - *Learning Density Functionals to Bridge Particle and Continuum Scales* (Monti, Yatsyshin, et al.)
 
 ## Maintainers
-- Peter Yatsyshin
 - Edoardo Monti
+- Peter Yatsyshin
 
 ---
 
@@ -191,10 +191,8 @@ python preprocess_data.py --wall wn2 \
 # → data/dataset/pkl/profiles_wl_wn2/z_profiles.pkl
 
 # Faster alternative: use pre-computed LDA references instead of an on-the-fly LDA solve
-python preprocess_data.py --skip-lda --wall wc \
-  --source ../data/dataset/lda_planar_wc
-python preprocess_data.py --skip-lda --wall wn2 \
-  --source ../data/dataset/lda_planar_wn2
+python preprocess_data.py --skip-lda --wall wc  --source ../data/dataset/lda_planar_wc
+python preprocess_data.py --skip-lda --wall wn2 --source ../data/dataset/lda_planar_wn2
 
 # 2. Train surrogates (set WALL to match step 1; edit epochs, train_T in adj_train.py)
 python adj_train.py

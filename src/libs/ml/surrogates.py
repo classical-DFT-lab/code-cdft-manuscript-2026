@@ -79,13 +79,13 @@ def setDNN(dft_model, LR, weight_decay=0.0, state_dicts=None):
     dft_model.optimizer_dnn = torch.optim.Adam(
                                                 [
                                                     {"params": dft_model.dnn_fn.parameters(), "lr": LR},
-                                                    {"params": dft_model.dnn_g_fn.parameters(), "lr": 0.1*LR},
+                                                    {"params": dft_model.dnn_g_fn.parameters(), "lr": LR},
                                                 ],
                                                 weight_decay=weight_decay,
                                               )
     
     #Scheduler - ExpDecay
-    dft_model.scheduler_dnn = torch.optim.lr_scheduler.ExponentialLR(dft_model.optimizer_dnn, gamma=0.95)        
+    dft_model.scheduler_dnn = torch.optim.lr_scheduler.ExponentialLR(dft_model.optimizer_dnn, gamma=0.9)        
     LRs = [dft_model.optimizer_dnn.param_groups[0]["lr"],]
 
     if state_dicts is not None:
@@ -119,7 +119,7 @@ def setDNNRep(dft_model, LR, weight_decay=0.0, state_dict=None):
     )
     
     #Scheduler - ExpDecay
-    dft_model.scheduler_dnn_rep = torch.optim.lr_scheduler.ExponentialLR(dft_model.optimizer_dnn_rep, gamma=0.95)        
+    dft_model.scheduler_dnn_rep = torch.optim.lr_scheduler.ExponentialLR(dft_model.optimizer_dnn_rep, gamma=0.9)        
     LRs = [dft_model.optimizer_dnn_rep.param_groups[0]["lr"],]
 
     if state_dict is not None:
@@ -157,7 +157,7 @@ def setWDA(dft_model, LR,
     )
     
     #Scheduler - ExpDecay
-    dft_model.scheduler_fno = torch.optim.lr_scheduler.ExponentialLR(dft_model.optimizer_fno, gamma=0.95)        
+    dft_model.scheduler_fno = torch.optim.lr_scheduler.ExponentialLR(dft_model.optimizer_fno, gamma=0.9)        
     LRs = [dft_model.optimizer_fno.param_groups[0]["lr"],]
 
     if state_dict is not None:

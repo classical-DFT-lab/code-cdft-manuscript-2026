@@ -3,13 +3,14 @@
 Data preprocessing pipeline for adj_train and related scripts.
 
 Generates z_profiles.pkl and z_profiles_0.pkl from:
-  1. z_profile.csv files in N*/T_* directory tree (MD data)
-  2. LDA DFT solutions for reference profiles (z_profiles_0)
+  1. z_profile.csv files in N*/T_* directory tree (MD data -> z_profiles.pkl)
+  2. LDA reference profiles (z_profiles_0): inline DFT solve or pre-computed LDA tree
 
 Usage:
   python preprocess_data.py [--source SOURCE] [--output OUTPUT] [--wall WALL]
-  e.g., python preprocess_data.py --skip-lda --wall wc
-  --source: Root dir with N*/T_*/z_profile.csv (default: ../data/dataset/md_planar_wc)
+  e.g., python preprocess_data.py --skip-lda --wall wc --source ../data/dataset/lda_planar_wc
+  --source: MD root (default) or LDA root when --skip-lda is set
+  --md-source: MD root when --skip-lda (default: ../data/dataset/md_planar_<wall>)
   --output: Output dir for z_profiles*.pkl (default: ../data/dataset/pkl/profiles_wl_wc)
   --wall:   "wn2" or "wc" - sets output path if --output not given
 """
@@ -81,6 +82,10 @@ def gather_profiles(root: Path) -> pd.DataFrame:
         df["rho_fit"] = df["rho"]
 
     return df[["x", "rho", "rho_fit"]]
+
+
+def default_dataset_root(name: str) -> Path:
+    return (Path(script_dir) / ".." / "data" / "dataset" / name).resolve()
 
 
 def build_z_profiles_0(df_md, mesh, eq_params, sol, device, Ew=1.2, sigmaw=1.2):
@@ -163,8 +168,15 @@ def main():
     parser.add_argument(
         "--source",
         type=Path,
-        default=Path(script_dir) / ".." / "data" / "dataset" / "md_planar_wc",
-        help="Root dir with N*/T_*/z_profile.csv",
+        default=None,
+        help="MD root with N*/T_*/z_profile.csv (default: md_planar_<wall>); "
+        "with --skip-lda: LDA reference root (default: lda_planar_<wall>)",
+    )
+    parser.add_argument(
+        "--md-source",
+        type=Path,
+        default=None,
+        help="MD root when using --skip-lda (default: md_planar_<wall>)",
     )
     parser.add_argument(
         "--output",
@@ -181,11 +193,28 @@ def main():
     parser.add_argument(
         "--skip-lda",
         action="store_true",
-        help="Skip LDA solve; use MD rho as rho_0 (faster, less accurate)",
+        help="Skip inline LDA solve; load pre-computed LDA reference via --source",
     )
     args = parser.parse_args()
 
-    source = args.source.expanduser().resolve()
+    md_source = (
+        args.md_source.expanduser().resolve()
+        if args.md_source is not None
+        else default_dataset_root(f"md_planar_{args.wall}")
+    )
+    if args.skip_lda:
+        lda_source = (
+            args.source.expanduser().resolve()
+            if args.source is not None
+            else default_dataset_root(f"lda_planar_{args.wall}")
+        )
+    else:
+        md_source = (
+            args.source.expanduser().resolve()
+            if args.source is not None
+            else default_dataset_root(f"md_planar_{args.wall}")
+        )
+
     if args.output is not None:
         output = args.output.expanduser().resolve()
     else:
@@ -199,9 +228,9 @@ def main():
     TORCH_DTYPE = torch.float32
     torch.manual_seed(42)
 
-    # 1. Gather z_profiles.pkl from z_profile.csv
-    print(f"Scanning {source} for z_profile.csv ...")
-    df_md = gather_profiles(source)
+    # 1. Gather z_profiles.pkl from MD z_profile.csv tree
+    print(f"Scanning {md_source} for MD z_profile.csv ...")
+    df_md = gather_profiles(md_source)
     z_profiles_path = output / "z_profiles.pkl"
     tensors_to_cpu_for_storage(df_md).to_pickle(z_profiles_path)
     Ns = df_md.index.get_level_values("N").unique()
@@ -212,8 +241,8 @@ def main():
 
     # 2. Build z_profiles_0.pkl (LDA reference)
     if args.skip_lda:
-        print("Skipping LDA solve (--skip-lda); using source rho as reference.")
-        df_0 = df_md[["x", "rho"]].copy()
+        print(f"Skipping LDA solve (--skip-lda); loading reference from {lda_source} ...")
+        df_0 = gather_profiles(lda_source)[["x", "rho"]].copy()
     else:
         print("Computing LDA reference profiles (z_profiles_0)...")
         R, Lambda = 1.0, 1.0

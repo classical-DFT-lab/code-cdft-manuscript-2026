@@ -15,18 +15,25 @@ src/**/*.pyc
 src/**/*.ipynb
 src/deprecated
 
-data/ml_model/ml_dicts0
-data/ml_model/ml_dicts1
+data/ml_model/ml_dicts_*
 data/ml_model/intermediate_models
 data/dataset/md_planar_wc/local
 data/dataset/pkl/bulk_tmd/** 
+
 output/**
 
+
 !output/**/.gitkeep
+!output/bulk_tmd/phase_curve.png
+!output/plot_train/rho/rho_*
+!output/plot_train/loss.png
+
+!data/ml_model/ml_dicts/U_guess.pkl
 !data/**/.gitkeep
 
 
 #To be added:
+src/tobeadded
 src/libs/omega_minimization
 
 

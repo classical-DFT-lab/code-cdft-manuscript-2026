@@ -79,7 +79,7 @@ class MY_DATASET_FROM_DF(Dataset):
         }
 
     def interpolate_rho(self, x_src, rho_src, x_target):
-        rho_interp = linear_interpolation(x_target, (x_src - x_src[0] + 0.05) + x_target[0], rho_src)[None,...]
+        rho_interp = linear_interpolation(x_target, (x_src - x_src[0] + (x_src[1] - x_src[0])/2) + x_target[0], rho_src)[None,...]
         return rho_interp 
 
 def my_collate_fn_old(batch):

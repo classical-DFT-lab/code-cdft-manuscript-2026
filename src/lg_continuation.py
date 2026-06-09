@@ -51,7 +51,7 @@ else:
     pkldir = os.path.join(datadir, "dataset", "pkl", "profiles_wl") + "/"
 
 plotdir = get_plot_dir(script_dir, "..", "output", "plot_lg_isotherm")
-DEVICE_KIND = "cuda"  # or "cuda" | "mps" | "cpu"; override with env TORCH_DEVICE
+DEVICE_KIND = "cpu"  # or "cuda" | "mps" | "cpu"; override with env TORCH_DEVICE
 device = resolve_training_device(DEVICE_KIND)
 if device.type == "cuda":
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
@@ -116,7 +116,7 @@ cutoff_wall = 10. * R
 ContactArea = 40*40 
 L = 30.
 xmin, xmax = -L, L
-Nx = int(2 * L / (0.075 * R))
+Nx = int(2 * L / (0.2 * R))
 x = torch.linspace(xmin, xmax, Nx, dtype=TORCH_DTYPE).to(device)
 dx = x[1] - x[0]
 x_wall = xmin - 0.001 * sigmaw

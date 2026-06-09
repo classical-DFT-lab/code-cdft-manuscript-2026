@@ -50,7 +50,7 @@ os.makedirs(plotdir, exist_ok=True)
 os.makedirs(plotdir_rho, exist_ok=True)
 
 # Wall type: "wn2" or "wc" (sets pkldir and Vext params)
-WALL = "wc"
+WALL = "wn2"
 if WALL == "wn2":
     pkldir = os.path.join(datadir, "dataset", "pkl", "profiles_wl_wn2") + os.sep
 elif WALL == "wc":
@@ -63,7 +63,7 @@ ml_intermediate_dir = os.path.join(datadir, "ml_model", "intermediate_models")
 os.makedirs(ml_dicts_dir, exist_ok=True)
 os.makedirs(ml_intermediate_dir, exist_ok=True)
 USE_MODEL = 1
-USE_DBH_DIAMETER = 1  # 1: use Barker-Henderson diameter scaling when USE_MODEL
+USE_DBH_DIAMETER = 0  # 1: use Barker-Henderson diameter scaling when USE_MODEL
 TRAIN_DNN = 1
 TRAIN_DNN_REP = 1
 TRAIN_WDA = 1
@@ -103,6 +103,7 @@ Lambda      = 1. #np.sqrt(h_p**2 * beta / (2*np.pi*m))
 newton_max_steps = 1600
 newton_tol = 5e-7
 newton_alpha = 0.9
+newton_alpha_first = 0.05  # epoch-0 step size; None uses newton_alpha for all epochs
 newton_verbose = 0
  
 cont_ds = 0.5 * (1 - 2*(ensemble=="NVT") )
@@ -130,11 +131,11 @@ cutoff_wall = 10. * R
 # 5 // Mesh: Spatial Discretization
 L           = 30.
 xmin, xmax  = 0., 2*L
-Nx          = int(2*L/(0.1*R))
+Nx          = int(2*L/(0.2*R))
 BS          = 5
 x_bc        = [xmin, xmax]
 x           = torch.linspace(xmin, xmax, Nx, dtype=TORCH_DTYPE).to(device)
-x_wall      = (xmin - 0.001*sigmaw)
+x_wall      = (xmin - 1e-12*sigmaw)
 dx          = x[1] - x[0]
 print(f"dx = {dx.item():.4f} , Nx = {Nx}\n\n")
 
@@ -163,7 +164,7 @@ rho_guess   = torch.zeros((BS, 1, Nx), dtype=TORCH_DTYPE).to(device)  # [B, 1, N
 
 
 # 9 // ML
-lr = 0.95e-3
+lr = 2.5e-3
 #weight_decay = 0.5e-7  # Adam L2 penalty for dnn_fn, dnn_g_fn, dnn_rep_fn, wda_fn
 weight_decay = 0.1e-7  # Adam L2 penalty for dnn_fn, dnn_g_fn, dnn_rep_fn, wda_fn
 epochs = 10000
@@ -456,7 +457,7 @@ for epoch in range(epochs):
                     detach_tensors=True,
                     max_steps=newton_max_steps,
                     tol=newton_tol ,
-                    alpha=newton_alpha,
+                    alpha= newton_alpha_first if (epoch == 0 and newton_alpha_first is not None) else newton_alpha,
                     verbose= 1 if epoch==0 else newton_verbose,
                     plot=True,
                     )
@@ -532,9 +533,9 @@ for epoch in range(epochs):
     model.optimizer_fno.step()
 
     # Scheduler
-    if (100*epoch/epochs)%10==0: model.scheduler_dnn.step()
-    if (100*epoch/epochs)%10==0: model.scheduler_dnn_rep.step()
-    if (100*epoch/epochs)%10==0: model.scheduler_fno.step()
+    if (100*epoch/epochs)%5==0 and epoch!=0: model.scheduler_dnn.step()
+    if (100*epoch/epochs)%5==0 and epoch!=0: model.scheduler_dnn_rep.step()
+    if (100*epoch/epochs)%5==0 and epoch!=0: model.scheduler_fno.step()
 
 
 

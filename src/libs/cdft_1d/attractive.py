@@ -184,7 +184,7 @@ class ATTRACTIVE_FREE_ENERGY():
         """
         cutoff = self.eq_params["cutoff_attr"]
         cutoff_val = cutoff.item() if hasattr(cutoff, "item") else float(cutoff)
-        dx_val = 0.02
+        dx_val = 0.01
         n_r = max(2, int(cutoff_val / dx_val) + 1)
         r_grid = dx_val * torch.arange(n_r, dtype=rho.dtype, device=rho.device)
         r_grid = torch.clamp(r_grid, min=1e-8)  # avoid psi singularity at 0
@@ -192,7 +192,9 @@ class ATTRACTIVE_FREE_ENERGY():
         # psi and g at 1D distances (_psi_attr returns (B, 1, N_r) for 1D input; squeeze to (B, N_r))
         psi_r = self._psi_attr_bulk(r_grid)  # (B, N_r)
         if self.sol["USE_MODEL"]:
-            g_r = self.dnn_g_fn(r_grid.unsqueeze(-1))[..., 0].unsqueeze(0)  # (1, N_r)
+            g_r = (self.dnn_g_fn(r_grid.unsqueeze(-1))[..., 0]
+            #* torch.exp(-(r_grid/5)**2)
+            ).unsqueeze(0)  # (1, N_r)
             kernel = (1 + 1e-3 * g_r) * psi_r  # (B, N_r)
         else:
             kernel = psi_r # (B, N_r)
@@ -224,7 +226,9 @@ class ATTRACTIVE_FREE_ENERGY():
         # psi and g at 1D distances (_psi_attr returns (B, 1, N_r) for 1D input; squeeze to (B, N_r))
         psi_r = self._psi_attr(r_grid).squeeze(1)  # (B, N_r)
         if self.sol["USE_MODEL"]:
-            g_r = self.dnn_g_fn(r_grid.unsqueeze(-1))[..., 0].unsqueeze(0)  # (1, N_r)
+            g_r = (self.dnn_g_fn(r_grid.unsqueeze(-1))[..., 0]
+            #* torch.exp(-(r_grid/5)**2)
+            ).unsqueeze(0)  # (1, N_r)
             kernel = (1 + 1e-3 * g_r) * psi_r
         else:
             kernel = psi_r
@@ -249,7 +253,10 @@ class ATTRACTIVE_FREE_ENERGY():
         LJ_xy = self._psi_attr(xy_abs)   # (B, Nx, Nx)
 
         if self.sol["USE_MODEL"]:
-            g = self.dnn_g_fn(xy_abs[..., None])[None, ..., 0]  # (B, Nx, Nx)
+            g = (
+                self.dnn_g_fn(xy_abs[..., None])[None, ..., 0]
+                # * torch.exp(-(xy_abs/5)**2) [None,...]
+                ) # (B, Nx, Nx)
         else:
             g = 0
 

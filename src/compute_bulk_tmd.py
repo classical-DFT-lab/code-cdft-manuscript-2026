@@ -35,7 +35,7 @@ if __name__ == "__main__":
 
     outdir = os.path.join(script_dir, "..", "output") + "/"
     datadir = os.path.join(script_dir, "..", "data") + "/"
-    pkldir = datadir + "dataset/pkl/profiles/"
+    pkldir = datadir + "dataset/pkl/bulk_tmd/"
 
     DEVICE_KIND = "auto"
     device = resolve_training_device(DEVICE_KIND)
@@ -162,10 +162,10 @@ if __name__ == "__main__":
     # Critical points
     # --------------------------------------------------------------------------
     sol_bulk["USE_MODEL"] = True
-    rho_c_guess, T_c_guess = 0.3190, 1.0779
+    rho_c_guess, T_c_guess = 0.3090, 1.0779
     rho_c_nn, T_c_nn = newton_critical_point(
         eq_params, mesh_bulk, sol_bulk, rho_c_guess, T_c_guess,
-        max_iter=150, tol=1e-9, alpha=1.0, device=device, ml_state_dicts_=ml_state_dicts
+        max_iter=150, tol=1e-9, alpha=0.5, device=device, ml_state_dicts_=ml_state_dicts
     )
     print("Critical point (NN):")
     print("rho_c =", rho_c_nn)
@@ -213,10 +213,10 @@ if __name__ == "__main__":
                                 sol_bulk=sol_bulk,
                                 ml_state_dicts=ml_state_dicts,
                                 use_model=True,
-                                rho_init_pair=(1e-15, 1.0 - 1e-15),
+                                rho_init_pair=(1e-12, 1.0 - 1e-12),
                                 tol=1e-7,
                                 max_iter=100000,
-                                alpha=0.5,
+                                alpha=0.25,
                                 chunk_size=len(T_list),   # or smaller if memory becomes an issue
                                 verbose=True,
                             )
@@ -291,9 +291,9 @@ if __name__ == "__main__":
     # --------------------------------------------------------------------------
     # Save
     # --------------------------------------------------------------------------
-    tensors_to_cpu_for_storage(pc_nn).to_pickle(os.path.join(output_dir, "pc_nn_operative.pkl"))
-    tensors_to_cpu_for_storage(pc_md).to_pickle(os.path.join(output_dir, "pc_md_operative.pkl"))
-    tensors_to_cpu_for_storage(pc_0).to_pickle(os.path.join(output_dir, "pc_0_operative.pkl"))
+    tensors_to_cpu_for_storage(pc_nn).to_pickle(os.path.join(pkldir, "pc_nn_operative.pkl"))
+    tensors_to_cpu_for_storage(pc_md).to_pickle(os.path.join(pkldir, "pc_md_operative.pkl"))
+    tensors_to_cpu_for_storage(pc_0).to_pickle(os.path.join(pkldir, "pc_0_operative.pkl"))
 
     with open(os.path.join(output_dir, "critical_point.txt"), "w") as f:
         f.write(f"NN: rho_c = {rho_c_nn}\nNN: T_c   = {T_c_nn}\n")

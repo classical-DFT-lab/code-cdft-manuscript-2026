@@ -32,4 +32,4 @@ def LossGradL2(U_fwd, U_data):
 
     Loss1 = torch.mean(torch.abs(U_fwd - U_data)**2) / torch.mean(torch.abs(U_data)**2)
     Loss2 = torch.mean(torch.abs(dU_fwd - dU_data)**2) / torch.mean(torch.abs(U_data)**2)
-    return Loss1 + Loss2
+    return Loss1 + 0.5*Loss2
