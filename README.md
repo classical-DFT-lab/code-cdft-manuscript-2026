@@ -48,7 +48,9 @@ cdft_lab2/
     ├── compute_bulk_tmd.py
     ├── lg_continuation.py
     ├── compute_gamma_lg.py
-    └── adsoprtion_continuation.py
+    ├── adsoprtion_continuation.py
+    ├── compute_adsorption_work.py
+    └── compute_contact_angle.py
 ```
 
 Each MD/LDA dataset follows the layout `N*/T_*/z_profile.csv` (plus auxiliary CSVs and figures). Generated `*.pkl` files and everything under `output/` are gitignored but preserved locally between runs.
@@ -96,6 +98,9 @@ pip install numpy pandas matplotlib tqdm
 | `data/dataset/pkl/bulk_tmd/` | Shipped phase-curve pickles (`pc_*_operative.pkl`) |
 | `data/dataset/postproc/` | Post-processed data |
 | `data/ml_model/ml_dicts/` | Default trained weights (`dnn_*.dict`, `wda_fn.dict`, `U_guess.pkl`) |
+| `data/dataset/pkl/profiles_wl_<wall>/work_regressor_wl_<wall>/` | TorchScript \(W(l)\) splines from `compute_adsorption_work.py` |
+| `data/dataset/pkl/profiles_wl_<wall>/mu0_regressor_wl_<wall>/` | TorchScript \(\mu_0(l)\) splines from `compute_adsorption_work.py` |
+| `data/dataset/md_drop_wc_2/` | MD drop density fields for contact-angle validation (`rho_field_T*.csv`) |
 | `output/` | Fresh results from script runs (plots, updated pickles) |
 
 Pre-trained weights are shipped under `data/ml_model/ml_dicts/`. To retrain them, run the preprocessing and training workflow below.
@@ -132,6 +137,8 @@ On multi-GPU machines, some scripts set `CUDA_VISIBLE_DEVICES`; adjust that vari
 | `lg_continuation.py` | Liquid–gas planar isotherms via Newton + continuation |
 | `compute_gamma_lg.py` | Liquid–gas surface tension \(\gamma_{lg}\) from isotherms |
 | `adsoprtion_continuation.py` | Wall–liquid adsorption isotherms (`wn2` / `wc` walls) |
+| `compute_adsorption_work.py` | Work of adsorption \(W(l)\), \(\mu_0(l)\) regressors, and \(\gamma_{wl}\)/\(\gamma_{wg}\) from WL isotherms |
+| `compute_contact_angle.py` | Macroscopic cap \(\Omega\) minimization and Young-angle comparison vs. MD drops |
 
 Most scripts (except `preprocess_data.py`) are configured by editing constants at the top of the file—`WALL`, temperatures, `DEVICE_KIND`, `USE_DBH_DIAMETER`, training flags, and output paths.
 
@@ -172,9 +179,23 @@ python compute_gamma_lg.py
 python adsoprtion_continuation.py
 # → data/dataset/pkl/profiles_wl_<wall>/isotherm_profiles_wl_<wall>.pkl
 # → output/plot_adsorption_isotherm/
+
+# 4. Work of adsorption and surface tensions (set WALL and ISOTHERM_PKL in the script)
+python compute_adsorption_work.py
+# → data/dataset/pkl/profiles_wl_<wall>/isotherm_work_wl_<wall>.pkl
+# → data/dataset/pkl/profiles_wl_<wall>/work_regressor_wl_<wall>/*.pt
+# → data/dataset/pkl/profiles_wl_<wall>/mu0_regressor_wl_<wall>/*.pt
+# → output/plot_adsorption_work_wl_<wall>/
+
+# 5. Contact angle from macroscopic Ω minimization
+python compute_contact_angle.py
+# → output/plot_contact_angle/thetaY_vs_T.png, gammas_vs_T.png
+# → output/plot_contact_angle/drop/Drop_T*.png (MD overlay + fitted cap)
 ```
 
 `compute_gamma_lg.py` reads the phase curve from `data/dataset/pkl/bulk_tmd/pc_nn_operative.pkl` (shipped). After re-running `compute_bulk_tmd.py`, copy or symlink the updated `pc_nn_operative.pkl` from `output/bulk_tmd/` if you want downstream scripts to use the fresh result.
+
+The adsorption → contact-angle chain requires `pc_md_operative_with_gamma.pkl` (from step 2 above) and WL isotherms from step 3. `compute_adsorption_work.py` does not need ML weights at runtime—it post-processes the continuation pickles only.
 
 #### Full retraining from MD data
 
@@ -268,7 +289,68 @@ Outputs plots to `output/plot_lg_isotherm/gamma_lg/` and updates `data/dataset/p
 
 #### `adsoprtion_continuation.py`
 
-Wall–liquid adsorption isotherms for `WALL = "wc"` (weakly attractive wall) or `"wn2"`. Uses the same Newton + continuation solver as the LG workflow but with a wall external potential.
+Wall–liquid adsorption isotherms for `WALL = "wc"` (weakly attractive wall) or `"wn2"`. Uses the same Newton + continuation solver as the LG workflow but with a wall external potential (`LJ93`).
+
+Each continuation frame stores `rho`, `omegaX` (grand-potential density), and `chem_pot`. Key settings at the top of the file:
+
+- `WALL`: `"wc"` or `"wn2"`
+- `isotherm_pkl_name`: output pickle filename (e.g. `isotherm_profiles_wl_wc_L30dx01_mlnew.pkl`)
+- `USE_MODEL`, `RESTART_ML_MODEL`: same flags as other inference scripts
+
+Writes `data/dataset/pkl/profiles_wl_<wall>/<isotherm_pkl_name>` and plots to `output/plot_adsorption_<isotherm_pkl_name>/`.
+
+#### `compute_adsorption_work.py`
+
+Post-processes WL continuation isotherms into the mesoscopic inputs needed for contact-angle prediction. 
+
+**Prerequisites:**
+
+- Isotherm pickle from `adsoprtion_continuation.py` (set `ISOTHERM_PKL` at the top)
+- `data/dataset/pkl/bulk_tmd/pc_md_operative_with_gamma.pkl` (for \(\rho_v\), \(\rho_l\), \(\gamma_{lg}\))
+
+**Pipeline (two steps in one script):**
+
+1. **Work integral** — for each continuation frame, integrate \(\int[\omega(x)-\omega_b]\,\mathrm{d}x\) over the wall+interface region; compute adsorbed-excess film thickness \(l\).
+2. **Regressor fit** — piecewise-linear splines for \(W(l)\) and \(\mu_0(l)\) on \(0 < l \le \texttt{VALIDITY}\), saved as TorchScript modules.
+
+Key settings:
+
+- `WALL`, `N_VALUE`: wall type and maximum particle number to process
+- `ISOTHERM_PKL`: input continuation pickle
+- `VALIDITY`, `L_FIT_MIN`: regressor fit window
+- `WORK_PLOT_EVERY_N`: diagnostic plot density for per-frame work integrals
+
+**Outputs:**
+
+| Path | Contents |
+|------|----------|
+| `data/dataset/pkl/profiles_wl_<wall>/isotherm_work_wl_<wall>.pkl` | Per-\(T\) work curves, film thickness, bulk densities |
+| `data/dataset/pkl/profiles_wl_<wall>/work_regressor_wl_<wall>/work_regressor_{T:.2f}.pt` | \(W(l)\) spline + landmarks (`Winf`, `l_min`, `l_max`, `W_wg`) |
+| `data/dataset/pkl/profiles_wl_<wall>/mu0_regressor_wl_<wall>/mu0_regressor_{T:.2f}.pt` | \(\mu_0(l)\) spline |
+| `output/plot_adsorption_work_wl_<wall>/` | Work-integral diagnostics, \(W\) vs \(l\), \(\gamma\) vs \(T\), regressor fits |
+
+From the regressors, surface tensions are extracted as \(\gamma_{wl} = W_\infty - \gamma_{lg}\) and \(\gamma_{wg} = W(0)\) (see `libs/omega_minimization/utils.py::upload_gammas_in_pc_`).
+
+#### `compute_contact_angle.py`
+
+Minimizes the macroscopic grand potential \(\Omega(t_0)\) for a spherical-cap drop on a flat wall, using the \(W(l)\) and \(\mu_0(l)\) regressors from `compute_adsorption_work.py`. Compares the predicted angle \(\theta_c = \pi/2 - t_0^\*\) to Young's angle \(\theta_Y\) and overlays the fitted cap on MD drop density fields.
+
+**Prerequisites:**
+
+- `pc_md_operative_with_gamma.pkl` (or `data/dataset/postproc/phase_curve_nn.pkl` as fallback)
+- TorchScript regressors under `data/dataset/pkl/profiles_wl_wc/work_regressor_wl_wc/` and `mu0_regressor_wl_wc/`
+- MD drop fields in `data/dataset/md_drop_wc_2/rho_field_T{T:.2f}.csv` (optional; temperatures without data are skipped)
+
+Key settings at the top of the file:
+
+- `T_list`: temperatures to process
+- `MD_DROP_DIR`: MD drop dataset folder
+
+**Outputs** under `output/plot_contact_angle/`:
+
+- `thetaY_vs_T.png`, `gammas_vs_T.png` — Young angle and extracted surface tensions
+- `sanitycheck/` — regressor vs. analytic \(W(l)\), \(\mu_0(l)\) checks
+- `drop/Drop_T{T}.png` — MD density contour with fitted Laplace arc
 
 Writes `data/dataset/pkl/profiles_wl_<wall>/isotherm_profiles_wl_<wall>.pkl` and plots to `output/plot_adsorption_isotherm/`.
 
@@ -281,3 +363,5 @@ Writes `data/dataset/pkl/profiles_wl_<wall>/isotherm_profiles_wl_<wall>.pkl` and
 - **CUDA out of memory** — set `DEVICE_KIND = "cpu"` or `export TORCH_DEVICE=cpu`, or reduce batch sizes / mesh resolution in the script.
 - **MPS / float64 issues on Apple Silicon** — use `torch.float32` for `TORCH_DTYPE` and `TORCH_DEVICE=mps`.
 - **Stale phase-curve pickle in `compute_gamma_lg.py`** — copy `output/bulk_tmd/pc_nn_operative.pkl` to `data/dataset/pkl/bulk_tmd/` after re-running `compute_bulk_tmd.py`.
+- **`FileNotFoundError` for `work_regressor_*.pt`** — run `compute_adsorption_work.py` after `adsoprtion_continuation.py`; ensure `ISOTHERM_PKL` points at the pickle you generated.
+- **Missing `pc_md_operative_with_gamma.pkl`** — run `compute_gamma_lg.py` (step 2 of the inference workflow) before `compute_adsorption_work.py` or `compute_contact_angle.py`.

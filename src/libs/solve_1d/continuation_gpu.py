@@ -52,15 +52,24 @@ def continuation(
 		omegaX_i, OmegaX_i = model.GetOmega(rho_)
 
 		with torch.no_grad():
-			sol_curve.append({
+			entry = {
 			"rho" :rho_.detach().cpu(), 
 			"mu" : mu_.detach().cpu(),
 			"omegaX" : omegaX_i.detach().cpu(),
 			"OmegaX" : OmegaX_i.detach().cpu()/(2*model.mesh["L"]),
 			"rhocoex_vl" : tensors_to_cpu_for_storage(model.sol["rho_vl"]),
-			})
+			}
+			if model.eq_params["ensemble"] == "NVT":
+				# In NVT "mu" is the continuation parameter (= N); the physical chemical
+				# potential is the Lagrange multiplier computed here.
+				chem_pot = model.GetChemPot(num_par = mu_.detach(), rho_guess = rho_.detach())
+				entry["chem_pot"] = chem_pot.detach().cpu()
+			sol_curve.append(entry)
+
 			_dev = model.sol["device"]
-			print("\step:", k, "\t\t" + model.eq_params["str_param"] + ":", mu_[0, 0].item())
+			print("step:", k, "\t\t" + model.eq_params["str_param"] + ":", mu_[0, 0].item())
+			if "chem_pot" in entry:
+				print("Chemical potential:", entry["chem_pot"].squeeze().item())
 			if torch.device(_dev).type == "cuda":
 				torch.cuda.empty_cache()
 				print(f"Memory allocated: {torch.cuda.memory_allocated() / 1e6:.2f} MB")
@@ -86,26 +95,50 @@ def continuation(
 				plt.clf()
 				plt.close()
 
-				# # omegaX, OmegaX, = [], []
-				mean_rho, mu, c = [], [], []
-				for i in range(len(sol_curve)):
-					mu.append(sol_curve[i]["mu"][0,0].detach().item())
-					mean_rho.append(torch.abs(sol_curve[i]["rho"]).mean(-1)[0].detach().item())
-					# # # # omegaX_i, OmegaX_i = sol_curve[i]["omegaX"], sol_curve[i]["OmegaX"]
-					# OmegaX.append(
-						#  OmegaX_i[0])
-					# omegaX.append(
-						#  omegaX_i[0,:])
-					c.append((i))
-				scat = plt.scatter(mu, mean_rho, c=c, cmap="winter_r")
+				# Diagnostics along the continuation curve
+				steps = list(range(len(sol_curve)))
+				lam = [s["mu"][0, 0].item() for s in sol_curve]               # continuation parameter (N in NVT, mu in muVT)
+				mean_rho = [s["rho"].mean(-1)[0].item() for s in sol_curve]   # signed mean (no abs: negative rho must show up)
+				min_rho = [s["rho"].min().item() for s in sol_curve]
+				chem_steps = [i for i, s in enumerate(sol_curve) if "chem_pot" in s]
+				chem_pot_c = [sol_curve[i]["chem_pot"].squeeze().item() for i in chem_steps]
+				if not chem_steps:  # muVT: the continuation parameter is the chemical potential itself
+					chem_steps, chem_pot_c = steps, lam
+				Om_steps = [i for i, s in enumerate(sol_curve) if "OmegaX" in s]
+				Omega_c = [sol_curve[i]["OmegaX"].squeeze().item() for i in Om_steps]
+
+				# Chemical potential vs mean density (the physical isotherm)
+				scat = plt.scatter(chem_pot_c, [mean_rho[i] for i in chem_steps], c=chem_steps, cmap="winter_r")
 				plt.colorbar(scat, label="step")
 				plt.xlabel(r"$\mu$")
 				plt.ylabel(r"$\langle\rho\rangle$")
 				plt.title(r"Chemical potential vs mean density")
 				plt.grid()
-				plt.savefig(os.path.join(plotdir_norm, "mu_meanrho.png"))
+				plt.savefig(os.path.join(plotdir_norm, "chempot_meanrho.png"))
 				plt.clf()
 				plt.close()
+
+				# 2x2 diagnostics panel
+				fig, axs = plt.subplots(2, 2, figsize=(11, 8))
+				axs[0, 0].plot(chem_steps, chem_pot_c, ".-")
+				axs[0, 0].set_xlabel("step")
+				axs[0, 0].set_title("Chemical potential")
+				axs[0, 1].plot(steps, lam, ".-", color="C1")
+				axs[0, 1].set_xlabel("step"); axs[0, 1].set_ylabel(model.eq_params["str_param"])
+				axs[0, 1].set_title("Continuation parameter")
+				axs[1, 0].plot(steps, mean_rho, ".-", color="C2", label=r"$\langle\rho\rangle$")
+				axs[1, 0].plot(steps, min_rho, ".-", color="C3", label=r"$\min_x \rho$")
+				axs[1, 0].axhline(0., color="k", lw=0.8)
+				axs[1, 0].set_xlabel("step"); axs[1, 0].set_ylabel(r"$\rho$")
+				axs[1, 0].set_title("Density bounds (negative = unphysical)")
+				axs[1, 0].legend()
+				axs[1, 1].plot(Om_steps, Omega_c, ".-", color="C4")
+				axs[1, 1].set_xlabel("step"); axs[1, 1].set_ylabel(r"$\Omega/(2L)$")
+				axs[1, 1].set_title("Grand potential per length")
+				for ax in axs.flat: ax.grid()
+				fig.tight_layout()
+				fig.savefig(os.path.join(plotdir_norm, "continuation_diagnostics.png"))
+				plt.close(fig)
 
 
 				plt.plot(model.mesh["x"].cpu(), sol_curve[-1]["omegaX"][0,0,:])
@@ -118,10 +151,6 @@ def continuation(
 				plt.close()
 
 	
-		if model.eq_params["ensemble"] == "NVT": 
-			chem_pot = model.GetChemPot(num_par = mu_.detach(), rho_guess = rho_.detach())
-			sol_curve[-1]["chem_pot"] = chem_pot.detach().cpu()
-			print("Chemical potential:", chem_pot.squeeze().item())  
 		### WARNING ###
 		L_val = model.mesh["L"] if not torch.is_tensor(model.mesh["L"]) else model.mesh["L"].item()
 		thresh = model.eq_params["target_density"] * (2 * L_val) + 0.1

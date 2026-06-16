@@ -14,14 +14,16 @@ src/**/*.out
 src/**/*.pyc
 src/**/*.ipynb
 src/deprecated
+src/local
 
 data/ml_model/ml_dicts_*
 data/ml_model/intermediate_models
 data/dataset/md_planar_wc/local
 data/dataset/pkl/bulk_tmd/** 
+data/dataset/pkl/ 
 
 output/**
-
+docs/** 
 
 !output/
 !output/bulk_tmd/
@@ -40,8 +42,6 @@ output/**
 
 #To be added:
 src/tobeadded
-src/libs/omega_minimization
-
 
 
 
