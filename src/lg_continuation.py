@@ -51,11 +51,8 @@ else:
     pkldir = os.path.join(datadir, "dataset", "pkl", "profiles_wl") + "/"
 
 plotdir = get_plot_dir(script_dir, "..", "output", "plot_lg_isotherm")
-DEVICE_KIND = "cpu"  # or "cuda" | "mps" | "cpu"; override with env TORCH_DEVICE
+DEVICE_KIND = "auto"  # or "cuda" | "mps" | "cpu"; override with env TORCH_DEVICE
 device = resolve_training_device(DEVICE_KIND)
-if device.type == "cuda":
-    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
-# os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 print(f"Using device: {device}")
 TORCH_DTYPE = torch.float32
 torch.manual_seed(42)
@@ -63,7 +60,7 @@ torch.manual_seed(42)
 # Flags
 JACOBIAN = "STABLE"
 USE_MODEL = 1
-USE_DBH_DIAMETER = 0  # 1: use Barker-Henderson diameter scaling when USE_MODEL
+USE_DBH_DIAMETER = 1  # 1: use Barker-Henderson diameter scaling when USE_MODEL
 TRAIN_DNN = 0
 TRAIN_WDA = 0
 RESTART_ML_MODEL = 1
@@ -117,9 +114,10 @@ ContactArea = 40*40
 L = 30.
 xmin, xmax = -L, L
 Nx = int(2 * L / (0.2 * R))
-x = torch.linspace(xmin, xmax, Nx, dtype=TORCH_DTYPE).to(device)
+dx = (xmax - xmin) / Nx
+x = torch.linspace(xmin + dx / 2, xmax - dx / 2, Nx, dtype=TORCH_DTYPE).to(device)
 dx = x[1] - x[0]
-x_wall = xmin - 0.001 * sigmaw
+x_wall = xmin
 BS = 1
 
 # ------------------------------------------------------------------------------
@@ -206,12 +204,12 @@ def run_evaluation(T_val, N_val, N_start, target_density, rho_init, refine, plot
     sd = ml_state_dicts
     setDNN(model, LR=0.0, state_dicts=sd)
     setDNNRep(model, LR=0.0, state_dict=sd["dnn_rep_fn"] if sd else None)
-    setWDA(model, LR=0.0, modes=150, state_dict=sd["wda_fn"] if sd else None)
+    setWDA(model, LR=0.0, modes=100, state_dict=sd["wda_fn"] if sd else None)
 
-    for param in model.dnn_fn.parameters(): param.requires_grad = False
+    for param in model.dnn_g_fn.parameters(): param.requires_grad = False
     for param in model.dnn_rep_fn.parameters(): param.requires_grad = False
     for param in model.wda_fn.parameters(): param.requires_grad = False
-    model.dnn_fn.eval()
+    model.dnn_g_fn.eval()
     model.dnn_rep_fn.eval()
     model.wda_fn.eval()
     

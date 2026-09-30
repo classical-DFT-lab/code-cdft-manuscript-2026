@@ -29,13 +29,14 @@ from libs.utils import linear_interpolation
 
 
 class MY_DATASET_FROM_DF(Dataset):
-    def __init__(self, dataframe, dataframe_0, target_grid, device, transform=True, dtype=torch.float64):
+    def __init__(self, dataframe, dataframe_0, target_grid, device, transform=True, dtype=torch.float64, x_wall=0.):
         """
         Args:
-            dataframe (pd.DataFrame): DataFrame with MultiIndex or tuple column ('N', 'T') and columns x, rho, rho_fit
+            dataframe (pd.DataFrame): DataFrame with MultiIndex or tuple column ('N', 'T') and columns x, rho
             target_grid (Tensor): Grid to interpolate onto
             transform (bool): If True, interpolate onto target grid
             dtype: torch dtype for tensors (should match sol["dtype"] / TORCH_DTYPE in training script)
+            x_wall (float): wall position on the target grid; x in the DataFrame is the distance from the wall
         """
         self.df = dataframe.reset_index(drop=False)
         self.df_md = dataframe
@@ -44,6 +45,7 @@ class MY_DATASET_FROM_DF(Dataset):
         self.transform = transform
         self.device = device
         self.dtype = dtype
+        self.x_wall = float(x_wall)
 
     def __len__(self):
         return len(self.df)
@@ -55,7 +57,6 @@ class MY_DATASET_FROM_DF(Dataset):
         T = row['T']
         x = torch.as_tensor(row['x'], dtype=self.dtype, device=self.device)  # (Nx)
         rho = torch.as_tensor(row['rho'], dtype=self.dtype, device=self.device)  # (Nx)
-        rho_fit = torch.as_tensor(row['rho_fit'], dtype=self.dtype, device=self.device)  # (Nx)
         rho_0 = torch.as_tensor(self.df_0.loc[(N, T)]["rho"], dtype=self.dtype, device=self.device)  # (Nx)
         x_0 = torch.as_tensor(self.df_0.loc[(N, T)]["x"], dtype=self.dtype, device=self.device)  # (Nx)
 
@@ -66,20 +67,18 @@ class MY_DATASET_FROM_DF(Dataset):
         if self.transform:
             rho = self.interpolate_rho(x, rho, self.target_grid)  # (1, Nx)
             rho_0 = self.interpolate_rho(x_0, rho_0, self.target_grid)  # (1, Nx)
-            rho_fit = self.interpolate_rho(x, rho_fit, self.target_grid)  # (1, Nx)
 
         return {
             'x': self.target_grid if self.transform else x,  # (Nx)
             'rho': rho,  # (1, Nx)
             'rho_0': rho_0,  # (1, Nx)
-            'rho_fit': rho_fit,  # (1, Nx)
             'N': N, # (1,)
             'beta': beta, # (1,)
             'T': T, # (1,)
         }
 
     def interpolate_rho(self, x_src, rho_src, x_target):
-        rho_interp = linear_interpolation(x_target, (x_src - x_src[0] + (x_src[1] - x_src[0])/2) + x_target[0], rho_src)[None,...]
+        rho_interp = linear_interpolation(x_target, x_src + self.x_wall, rho_src)[None,...]
         return rho_interp 
 
 def my_collate_fn_old(batch):
@@ -124,7 +123,7 @@ def setDatasetObject(good_N, good_T, datadir, mesh, sol, batch_size, transform, 
     target_grid = mesh["x"]
     td = sol_dtype(sol)
     dataset = MY_DATASET_FROM_DF(
-        df, df_0, target_grid, device=sol["device"], transform=transform, dtype=td
+        df, df_0, target_grid, device=sol["device"], transform=transform, dtype=td, x_wall=mesh["x_wall"]
     )
 
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, #pin_memory=True,

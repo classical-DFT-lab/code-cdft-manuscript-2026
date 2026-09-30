@@ -6,7 +6,6 @@ import torch.nn.functional as torch_f
 # import pyro.distributions as dist
 # import pyro.distributions.transforms as T
 
-#from fmt import FMT
 
 class CDFT():
     """

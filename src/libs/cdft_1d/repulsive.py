@@ -7,7 +7,7 @@ class REPULSIVE_FREE_ENERGY():
     def __init__(self):
         
         R = self.eq_params["R"]
-        a = torch.tensor(0.996*6)/(torch.pi*(R)**3)
+        a = torch.tensor(6.)/(torch.pi*(R)**3)
         self.eq_params["a"] = a[None] # (1,)
 
 
@@ -20,8 +20,7 @@ class REPULSIVE_FREE_ENERGY():
         if self.sol["USE_MODEL"]:
             if use_dbh:
                 dbh = self.bh_diameter()  # (B,1)
-                C = self.eq_params["pred_dnn"][...,3:4]
-                a = self.eq_params["a"] * (1 + 1e-3*C) / dbh**3  # (B,1)
+                a = self.eq_params["a"] / dbh**3  # (B,1)
             else:
                 a = self.eq_params["a"]    # (B,1)
         else:
@@ -29,7 +28,7 @@ class REPULSIVE_FREE_ENERGY():
             a = self.eq_params["a"][None,...] / dbh**3  # (1,1)
         beta = self.eq_params["beta"]  # (B,1)
 
-        if self.sol["USE_MODEL"]:
+        if self.sol["USE_MODEL"] and self.sol.get("USE_WDA", True):
             out_wda = self.wda_fn(rho)  # (B, 1, Nx)
             corr = out_wda
             # print(corr)
@@ -41,11 +40,12 @@ class REPULSIVE_FREE_ENERGY():
             ]  # [(B, 1, Nx)]
 
         # Compute list of inputs for phi:        
+        om_n = torch.clamp(1 - n[0], min=1e-12)  # keeps the CS term repulsive if an iterate reaches n > 1
         phiR_0 = ( 
                     (a / beta)[...,None]  # (B, 1, 1)
                     *
                 #n[0] * (3 - 2*n[0]) / (1 - n[0])**2
-                n[0]**2 * (4 - 3*n[0]) / (1 - n[0])**2  # (B, 1, Nx)
+                n[0]**2 * (4 - 3*n[0]) / om_n**2  # (B, 1, Nx)
                 )  # (B, 1, Nx)
 
         # phiR_0 = ( 
@@ -97,7 +97,7 @@ class REPULSIVE_FREE_ENERGY():
         return psi_rep
 
     def bh_diameter(self):
-        grid = torch.linspace(0, 1**(1/6), 100, dtype=sol_dtype(self.sol), device=self.sol["device"])
+        grid = torch.linspace(1e-6, 1., 100, dtype=sol_dtype(self.sol), device=self.sol["device"])
         dgrid = grid[1]-grid[0]
         u = self.psi_rep(grid)[None,None,:] # (B, 1, Ng)
         f = 1 - torch.exp(-self.eq_params["beta"][...,None]*u)
@@ -111,8 +111,7 @@ class REPULSIVE_FREE_ENERGY():
         if self.sol["USE_MODEL"]:
             if use_dbh:
                 dbh = self.bh_diameter()  # (B,1)
-                C = self.eq_params["pred_dnn"][...,3:4]
-                a = self.eq_params["a"] * (1 + 1e-3*C) / dbh**3  # (B,1)
+                a = self.eq_params["a"] / dbh**3  # (B,1)
             else:
                 a = self.eq_params["a"]    # (B,1)
         else:
@@ -127,11 +126,12 @@ class REPULSIVE_FREE_ENERGY():
             ]  # [(B, 1)]
 
         # Compute list of inputs for phi:        
+        om_n = torch.clamp(1 - n[0], min=1e-12)
         phiR_0 = ( 
                     (a / beta)  # (B, 1,)
                     *
                 #n[0] * (3 - 2*n[0]) / (1 - n[0])**2
-                n[0]**2 * (4 - 3*n[0]) / (1 - n[0])**2  # (B, 1,)
+                n[0]**2 * (4 - 3*n[0]) / om_n**2  # (B, 1,)
                 )  # (B, 1, Nx)
 
 

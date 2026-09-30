@@ -26,12 +26,12 @@ class SpectralConv1d(nn.Module):
         self.L_new = mesh["L"]
         self.dtype = dtype
 
-        scale = 1. / (input_dim * output_dim)
-
-        #self.real_weight = nn.Parameter(torch.empty(output_dim, input_dim, modes).uniform_(1. - 0.001*scale, 1. + 0.001*scale))
-        self.real_weight = nn.Parameter(torch.ones(output_dim, input_dim, modes0, dtype=dtype))
+        # Gaussian kernel of width 0.3 as initial weight function
+        k = 2*torch.pi*torch.arange(modes0, dtype=dtype) / (2*self.L0)
+        wk = torch.exp(-0.5*(0.3*k)**2)
+        self.real_weight = nn.Parameter(wk.expand(output_dim, input_dim, modes0).clone())
         self.imag_weight = nn.Parameter(
-            torch.empty(output_dim, input_dim, modes0, dtype=dtype).uniform_(-0.*scale, 0.*scale)
+            torch.zeros(output_dim, input_dim, modes0, dtype=dtype)
         ).requires_grad_(False)
         self.auxiliary = nn.Parameter(torch.tensor([1.0, 10.0], dtype=dtype))
 
@@ -104,6 +104,9 @@ class WDABlock1d(nn.Module):
             input_dim, output_dim, modes, mesh, tabulated=False, dtype=dtype
         )
         self.linear_bypass = nn.Conv1d(input_dim, output_dim, kernel_size=1, bias=use_bias, dtype=dtype)
+        nn.init.zeros_(self.linear_bypass.weight)
+        if use_bias:
+            nn.init.zeros_(self.linear_bypass.bias)
         self.activation = activation
 
     def forward(self, x):

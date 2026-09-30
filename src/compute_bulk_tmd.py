@@ -47,7 +47,7 @@ if __name__ == "__main__":
     # Flags
     JACOBIAN = "EXACT"
     USE_MODEL = 1
-    USE_DBH_DIAMETER = 0
+    USE_DBH_DIAMETER = 1
     TRAIN_DNN = 0
     TRAIN_WDA = 0
     RESTART_ML_MODEL = 1
@@ -74,9 +74,10 @@ if __name__ == "__main__":
     L = 30.0
     xmin, xmax = -L, L
     Nx = int(2 * L / (0.2 * R))
-    x = torch.linspace(xmin, xmax, Nx, dtype=TORCH_DTYPE).to(device)
+    dx = (xmax - xmin) / Nx
+    x = torch.linspace(xmin + dx / 2, xmax - dx / 2, Nx, dtype=TORCH_DTYPE).to(device)
     dx = x[1] - x[0]
-    x_wall = xmin - 0.01 * sigmaw
+    x_wall = xmin
     BS = 1
 
     # Minimal bulk mesh
@@ -156,7 +157,7 @@ if __name__ == "__main__":
     sd = ml_state_dicts
     setDNN(model, LR=0, state_dicts=sd)
     setDNNRep(model, LR=0, state_dict=sd["dnn_rep_fn"] if sd else None)
-    setWDA(model, LR=0, modes=150, state_dict=sd["wda_fn"] if sd else None)
+    setWDA(model, LR=0, modes=100, state_dict=sd["wda_fn"] if sd else None)
 
     # --------------------------------------------------------------------------
     # Critical points
@@ -225,7 +226,7 @@ if __name__ == "__main__":
     T_md = [0.64, 0.67, 0.70, 0.73, 0.76, 0.79, 0.82, 0.85, 0.88, 0.91, 0.94, 0.97, 1.00, 1.03, 1.06]
     rho_l_md = [0.8176, 0.8024, 0.7866, 0.7704, 0.7538, 0.7361, 0.7181, 0.6986, 0.6784, 0.6556, 0.6309, 0.6032, 0.5712, 0.530, 0.463]
     rho_v_md = [0.00351, 0.00525, 0.00727, 0.01036, 0.01374, 0.01776, 0.0233, 0.0303, 0.0392, 0.0483, 0.0616, 0.0763, 0.096, 0.127, 0.168]
-    T_md.append(1.085)
+    T_md.append(1.0779)
     rho_v_md.append(0.3170)
     rho_l_md.append(0.3170)
 

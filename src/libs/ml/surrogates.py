@@ -9,11 +9,10 @@ def load_ml_state_dicts(datadir, device):
     """
     Load all ML surrogate state dicts from disk once. Use with setDNN/setDNNRep/setWDA
     to avoid repeated disk I/O when creating many models (e.g. bulk coexistence loop).
-    Returns dict with keys: dnn_fn, dnn_g_fn, dnn_rep_fn, wda_fn.
+    Returns dict with keys: dnn_g_fn, dnn_rep_fn, wda_fn.
     """
     base = datadir + "ml_model/ml_dicts/"
     return {
-        "dnn_fn": torch.load(base + "dnn_fn.dict", map_location=device),
         "dnn_g_fn": torch.load(base + "dnn_g_fn.dict", map_location=device),
         "dnn_rep_fn": torch.load(base + "dnn_rep_fn.dict", map_location=device),
         "wda_fn": torch.load(base + "wda_fn.dict", map_location=device),
@@ -33,6 +32,9 @@ class DNN(nn.Module):
 
         layers.append(nn.Linear(hidden_dim, output_dim).to(dtype=dtype))
         self.net = nn.Sequential(*layers)
+        for layer in self.net:
+            if isinstance(layer, nn.Linear):
+                nn.init.zeros_(layer.bias)
 
     #@torch.compile
     def forward(self, x):
@@ -52,6 +54,9 @@ class DNNRep(nn.Module):
 
         layers.append(nn.Linear(hidden_dim, output_dim).to(dtype=dtype))
         self.net = nn.Sequential(*layers)
+        for layer in self.net:
+            if isinstance(layer, nn.Linear):
+                nn.init.zeros_(layer.bias)
     
     def forward(self, x): #in: (B, 1, Nx) 
         x_ = torch.einsum("bui->biu", x)  # (B, Nx, 1)
@@ -64,35 +69,29 @@ def setDNN(dft_model, LR, weight_decay=0.0, state_dicts=None):
     Args:
         dft_model: CDFT model to attach DNN surrogates to
         LR: learning rate (unused when not training)
-        weight_decay: Adam L2 penalty for dnn_fn and dnn_g_fn parameters
-        state_dicts: optional dict with 'dnn_fn' and 'dnn_g_fn' keys; if provided, use instead of loading from disk
+        weight_decay: Adam L2 penalty for dnn_g_fn parameters
+        state_dicts: optional dict with a 'dnn_g_fn' key; if provided, use instead of loading from disk
     """
     B = dft_model.mesh["BS"]
     dt = sol_dtype(dft_model.sol)
     dev = dft_model.sol["device"]
-    dnn_fn = DNN(input_dim=1, output_dim=6, hidden_dim=24, num_layers=6, dtype=dt).to(dev)
-    dnn_g_fn = DNN(input_dim=1, output_dim=1, hidden_dim=24, num_layers=6, dtype=dt).to(dev)
-    dft_model.dnn_fn = torch.jit.trace(dnn_fn, torch.zeros([B, 1], dtype=dt, device=dev))
-    dft_model.dnn_g_fn = torch.jit.trace(dnn_g_fn, torch.zeros([B, 1], dtype=dt, device=dev))
+    dnn_g_fn = DNN(input_dim=2, output_dim=1, hidden_dim=24, num_layers=6, dtype=dt).to(dev)
+    dft_model.dnn_g_fn = torch.jit.trace(dnn_g_fn, torch.zeros([B, 2], dtype=dt, device=dev))
 
     # Optimizer for DNN model --------------
     dft_model.optimizer_dnn = torch.optim.Adam(
-                                                [
-                                                    {"params": dft_model.dnn_fn.parameters(), "lr": LR},
-                                                    {"params": dft_model.dnn_g_fn.parameters(), "lr": LR},
-                                                ],
-                                                weight_decay=weight_decay,
-                                              )
+        dft_model.dnn_g_fn.parameters(),
+        lr=LR,
+        weight_decay=weight_decay,
+    )
     
     #Scheduler - ExpDecay
     dft_model.scheduler_dnn = torch.optim.lr_scheduler.ExponentialLR(dft_model.optimizer_dnn, gamma=0.9)        
     LRs = [dft_model.optimizer_dnn.param_groups[0]["lr"],]
 
     if state_dicts is not None:
-        dft_model.dnn_fn.load_state_dict(state_dicts["dnn_fn"])
         dft_model.dnn_g_fn.load_state_dict(state_dicts["dnn_g_fn"])
     elif dft_model.sol["RESTART_ML_MODEL"]:
-        dft_model.dnn_fn.load_state_dict(torch.load(dft_model.sol["datadir"] + "ml_model/ml_dicts/dnn_fn.dict", map_location=dft_model.sol["device"]))
         dft_model.dnn_g_fn.load_state_dict(torch.load(dft_model.sol["datadir"] + "ml_model/ml_dicts/dnn_g_fn.dict", map_location=dft_model.sol["device"]))
 
 

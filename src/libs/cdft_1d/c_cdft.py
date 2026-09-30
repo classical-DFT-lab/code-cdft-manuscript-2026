@@ -65,7 +65,10 @@ class CDFT():
         Vext_BCR = self.return_VextBCR(rho_guess)  # (B, 1, Nx)
 
         # Compute the RHS of the EulerLagrange eq. rho = h0[rho] => rho_id * exp( - beta*DF ) 
-        exp =  torch.exp(-beta[...,None]*(out["DF"] + Vext + Vext_BCR))  # (B, 1, Nx)
+        # Soft ceiling on the exponent (identical below ~45), so that a bad iterate cannot overflow
+        z = -beta[...,None]*(out["DF"] + Vext + Vext_BCR)  # (B, 1, Nx)
+        z = 50. - torch.nn.functional.softplus(50. - torch.clamp(z, min=-700.))
+        exp = torch.exp(z)  # (B, 1, Nx)
         int_exp = torch.einsum("...uj->...u", exp * dx)  # (B, 1)
 
         rho_h0 = mu[...,None] * exp / int_exp[...,None]  # (B, 1, Nx)

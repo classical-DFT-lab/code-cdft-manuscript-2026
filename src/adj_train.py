@@ -15,20 +15,19 @@ from libs.solve_1d.picard import picard
 from libs.solve_1d.newton import newton
 from libs.solve_1d.adjoint import adjoint
 
-from libs.ml.surrogates import setDNN, setDNNRep, setWDA, load_ml_state_dicts
+from libs.ml.surrogates import setDNN, setDNNRep, setWDA, load_ml_state_dicts, DNN
 from libs.ml.dataset_pd import setDatasetObject
-from libs.ml.loss import LossL1, LossL2, SpectralLoss, LossGradL2
+from libs.ml.loss import LossL1, LossL2, SpectralLoss, LossGradL2, MMD2Loss
 from libs.thermodynamics import batched_coexistence_temperatures
 from libs.utils import *
 from libs.io_utils import load_pickle, DataNotFoundError
 
 import matplotlib.pyplot as plt
-plt.rcParams["text.usetex"] = True
+plt.rcParams["text.usetex"] = False
 
 import os
 # Compute backend: "auto" | "cuda" | "mps" | "cpu". Override: export TORCH_DEVICE=mps
-os.environ["CUDA_VISIBLE_DEVICES"] = "2" 
-DEVICE_KIND = "cuda"
+DEVICE_KIND = "auto"
 device = resolve_training_device(DEVICE_KIND)
 if device.type == "cuda":
     torch.backends.cudnn.benchmark = True
@@ -36,7 +35,7 @@ if device.type == "cuda":
 print(f"Using device: {device}")
 # Floating-point dtype for grids, parameters, and ML (torch.float64 or torch.float32).
 # Apple MPS often works best with torch.float32.
-TORCH_DTYPE = torch.float32
+TORCH_DTYPE = torch.float64
 torch.manual_seed(42)  # For reproducibility
 
 
@@ -63,7 +62,7 @@ ml_intermediate_dir = os.path.join(datadir, "ml_model", "intermediate_models")
 os.makedirs(ml_dicts_dir, exist_ok=True)
 os.makedirs(ml_intermediate_dir, exist_ok=True)
 USE_MODEL = 1
-USE_DBH_DIAMETER = 0  # 1: use Barker-Henderson diameter scaling when USE_MODEL
+USE_DBH_DIAMETER = 1  # 1: use Barker-Henderson diameter scaling when USE_MODEL
 TRAIN_DNN = 1
 TRAIN_DNN_REP = 1
 TRAIN_WDA = 1
@@ -100,10 +99,13 @@ Lambda      = 1. #np.sqrt(h_p**2 * beta / (2*np.pi*m))
 
 
 # 2 // SOLVERS: Parameter for the DFT Model solvers
-newton_max_steps = 1600
-newton_tol = 5e-7
+picard_steps = 50         # damped Picard prewarm from the MD profile
+picard_steps_safe = 500   # longer prewarm if Newton does not converge after the short one
+picard_alpha = 0.03
+warm_start = 1            # 1: Newton from the previous step's solution, Picard prewarm only if it fails
+newton_max_steps = 40
+newton_tol = 1e-11     # on max|res|
 newton_alpha = 0.9
-newton_alpha_first = 0.05  # epoch-0 step size; None uses newton_alpha for all epochs
 newton_verbose = 0
  
 cont_ds = 0.5 * (1 - 2*(ensemble=="NVT") )
@@ -134,8 +136,9 @@ xmin, xmax  = 0., 2*L
 Nx          = int(2*L/(0.2*R))
 BS          = 5
 x_bc        = [xmin, xmax]
-x           = torch.linspace(xmin, xmax, Nx, dtype=TORCH_DTYPE).to(device)
-x_wall      = (xmin - 1e-12*sigmaw)
+dx          = (xmax - xmin)/Nx
+x           = torch.linspace(xmin + dx/2, xmax - dx/2, Nx, dtype=TORCH_DTYPE).to(device)
+x_wall      = xmin
 dx          = x[1] - x[0]
 print(f"dx = {dx.item():.4f} , Nx = {Nx}\n\n")
 
@@ -164,10 +167,16 @@ rho_guess   = torch.zeros((BS, 1, Nx), dtype=TORCH_DTYPE).to(device)  # [B, 1, N
 
 
 # 9 // ML
-lr = 2.5e-3
-#weight_decay = 0.5e-7  # Adam L2 penalty for dnn_fn, dnn_g_fn, dnn_rep_fn, wda_fn
-weight_decay = 0.1e-7  # Adam L2 penalty for dnn_fn, dnn_g_fn, dnn_rep_fn, wda_fn
-epochs = 10000
+# Two stages: smooth corrections (dnn_rep_fn, dnn_g_fn) with the weighted density switched off,
+# then all the corrections with the WDA kernel. Each stage is a ladder of (learning rate, steps),
+# with a fresh Adam at every rung.
+stage_smooth = ((3e-3, 150), (1e-3, 130))
+stage_wda = ((1e-3, 4000), (3e-4, 4000), (1e-4, 1350))
+clip_norm = 1.0
+guard_factor = 5.0     # loss > guard_factor*best (and above the loss the rung started at) -> back to best
+max_guard_fires = 6
+guard_backoff = 0.5
+log_every = 50
 train_T = [0.55, 0.65, 0.75, 0.85, 0.95]
 #train_T = [0.55, ]
 good_N = [8000]
@@ -198,7 +207,7 @@ mesh = {
     "L": L,
     "Nx": Nx,
     "x_bc": [xmin, xmax],
-    "x": torch.linspace(xmin, xmax, Nx, dtype=TORCH_DTYPE).to(device),
+    "x": x,
     "x_wall": torch.tensor(x_wall, dtype=TORCH_DTYPE, device=device),
     "dx": dx.to(device),
 }
@@ -219,8 +228,9 @@ sol = {
     "TRAIN_DNN_REP": TRAIN_DNN_REP,
     "TRAIN_WDA": TRAIN_WDA,
     "JACOBIAN": JACOBIAN,
-    "LOSS": LossGradL2,  # LossL2, LossL1, LossGradL2 or SpectralLoss
+    "LOSS": None,  # set below on the mesh
 }
+sol["LOSS"] = MMD2Loss(mesh["x"], mesh["dx"])
 
 
 
@@ -228,6 +238,13 @@ sol = {
 # ------------------------------------------------------------------------------
 # Instantiate CDFT Model -------------------------------------------
 model = CDFT(eq_params, mesh, sol)
+# Initial weights. The throwaway network below is not part of the model: it only consumes the random
+# draws that preceded the corrections in the run of the published weights, so that seed 42 gives
+# the same initial weights.
+DNN(input_dim=1, output_dim=6, hidden_dim=24, num_layers=6)
+setDNN(model, LR=0.)
+setDNNRep(model, LR=0.)
+setWDA(model, LR=0., modes=100)
 
 
 
@@ -248,15 +265,8 @@ data_md, dataloader_md = setDatasetObject(
 
 # ------------------------------------------------------------------------------
 # Instantiate ML Models -------------------------------------------
-setDNN(model, LR=lr, weight_decay=weight_decay)
-setDNNRep(model, LR=lr, weight_decay=weight_decay)
-setWDA(model, LR=lr, modes=150, weight_decay=weight_decay)
-
 if not TRAIN_DNN:
-    model.dnn_fn.eval()
     model.dnn_g_fn.eval()
-    for param in model.dnn_fn.parameters():
-        param.requires_grad = False
     for param in model.dnn_g_fn.parameters():
         param.requires_grad = False
 if not TRAIN_DNN_REP:
@@ -271,298 +281,182 @@ if not TRAIN_WDA:
 
 
 # ------------------------------------------------------------------------------
-# Initialize the guess solution pandas DataFrame
-ml_state_dicts = load_ml_state_dicts(datadir, device) if RESTART_ML_MODEL else None
-
-if RESTART_ML_MODEL:
-    U_guess_df = load_pickle(
-        os.path.join(ml_dicts_dir, "U_guess.pkl"),
-        description="U_guess (restart file)",
-        hint="Train from scratch with RESTART_ML_MODEL=0, or ensure a previous run saved U_guess.pkl.",
-    )
-    U_guess_df[['rho', 'x']] = dataframe_elementwise_map(
-        U_guess_df[['rho', 'x']],
-        lambda arr: torch.tensor(arr, dtype=model.sol["dtype"], device=model.sol["device"]),
-    )
-elif 1:
-    # df_0 is initial reference MF LDA solution DataFrame with MultiIndex (N, T)
-    U_guess_df = data_md.df_0.copy()[['rho', "x"]]   # Guess solution from LDA MF
-    #U_guess_df = data_md.df_md.copy()[['rho', "x"]]   # Guess solution MD
-    U_guess_df = U_guess_df.reset_index().set_index(['N', 'T']).sort_index()
-    U_guess_df[['rho', 'x']] = dataframe_elementwise_map(
-        U_guess_df[['rho', 'x']],
-        lambda arr: torch.tensor(arr, dtype=model.sol["dtype"], device=model.sol["device"]),
-    )
-else:
-    rho_v_b, rho_l_b = batched_coexistence_temperatures(
-        T_list=train_T,
-        eq_params=eq_params,
-        sol=sol,
-        ml_state_dicts=ml_state_dicts,
-        use_model=sol["USE_MODEL"],
-        rho_init_pair=(1e-8, 1.0 - 1e-8),
-        tol=1e-5,
-        max_iter=100000,
-        alpha=0.8,
-        chunk_size=len(train_T),
-        verbose=True,
-    )
-
-    # Build one initial profile per training temperature
-    a = ((good_N[0] - (xmax - xmin) * rho_v_b) / (rho_l_b - rho_v_b))[:, None, None]
-
-    rho_init_full = (
-        torch.sigmoid(2 * (mesh["x"][None, None, :] - (xmin + 1.0)))
-        * (rho_l_b[:, None, None] - rho_v_b[:, None, None])
-        * torch.sigmoid(-2 * (mesh["x"][None, None, :] - a))
-        + rho_v_b[:, None, None]
-    ).to(device=device, dtype=TORCH_DTYPE)  # (len(train_T), 1, Nx)
-
-    # Homogenize with the other branches: create U_guess_df with columns ["rho", "x"]
-    U_guess_records = []
-    x_profile = mesh["x"][None, :].to(device=device, dtype=TORCH_DTYPE)  # (1, Nx)
-
-    for i, T_val in enumerate(train_T):
-        U_guess_records.append(
-            {
-                "N": good_N[0],
-                "T": T_val,
-                "rho": rho_init_full[i, 0].clone(),   # (Nx,)
-                "x": x_profile[0].clone(),            # (Nx,)
-            }
-        )
-
-    U_guess_df = pd.DataFrame(U_guess_records).set_index(["N", "T"]).sort_index()
-
-
-U_guess_df = normalize_profiles_nt_multiindex(U_guess_df)
-    
-for idx, row in U_guess_df.iterrows():
-    x_src = row['x']            # torch tensor (Nx,)
-    rho_src = row['rho'].squeeze() # torch tensor (Nx,) or (1, Nx)
-    
-    rho_interp = data_md.interpolate_rho(
-        x_src,
-        rho_src,
-        model.mesh["x"],
-    ).to(model.sol["device"])       # shape: (1, Nx)
-
-    U_guess_df.at[idx, 'rho'] = rho_interp
-    U_guess_df.at[idx, 'x'] = model.mesh["x"]
+# Training batch: the 5 MD states, solved from the MD profile at every step
+batch = next(iter(dataloader_md))
+rho_d = batch['rho']                             # [B, 1, Nx]
+N_val = batch["N"]                               # [B, 1]
+model.eq_params["beta"] = batch["beta"]          # [B, 1]
+model.eq_params["mu"] = torch.sum(rho_d, dim=-1)*dx   # [B, 1]  N_MD/ 20**2 --> Area MD simulation box
+print("Training states (N, T):", [(int(n), round(float(t), 2)) for n, t in zip(N_val[:, 0], batch["T"][:, 0])])
 
 
 
+n_fallbacks = 0
+rho_prev = None
 
-def update_U_guess_df(U_guess_df, batch, new_rho):
-    # new_rho: tensor of shape [B, 1, Nx]
-    for i in range(new_rho.size(0)):
-        N_val, T_key = profile_nt_index_key(batch['N'][i].item(), batch['T'][i].item())
-        U_guess_df.at[(N_val, T_key), 'rho'] = new_rho[i, ...]
+def solve_forward(rho_guess):
+    global n_fallbacks, rho_prev
+    if warm_start and rho_prev is not None:
+        out = newton(model, U_guess=rho_prev, detach_tensors=True, max_steps=newton_max_steps,
+                     tol=newton_tol, alpha=newton_alpha, verbose=newton_verbose)
+        if torch.isfinite(out["U"]).all() and out["converged"]:
+            rho_prev = out["U"]
+            return out
+        n_fallbacks += 1
+    for steps in (picard_steps, picard_steps_safe):
+        out_p = picard(model, U_guess=rho_guess, max_steps=steps, tol=newton_tol, alpha=picard_alpha, verbose=False)
+        out = newton(model, U_guess=out_p["U"], detach_tensors=True, max_steps=newton_max_steps,
+                     tol=newton_tol, alpha=newton_alpha, verbose=newton_verbose)
+        if torch.isfinite(out["U"]).all() and out["res_max"] <= out_p["res_max"]:
+            rho_prev = out["U"]
+            return out
+        # Newton left the branch: retry with the longer prewarm
+        n_fallbacks += 1
+        if steps >= picard_steps_safe:
+            break
+    rho_prev = None
+    return out_p
 
-def get_rho_from_U_guess_df(U_guess_df, batch):
-    rho_list = []
+def rel_l2(rho, rho_ref):
+    return torch.sqrt(torch.sum((rho - rho_ref)**2, dim=(1, 2)) / torch.sum(rho_ref**2, dim=(1, 2)))
 
-    for i in range(batch['rho'].shape[0]):
-        N_val, T_key = profile_nt_index_key(batch['N'][i].item(), batch['T'][i].item())
+def snapshot(modules):
+    return [{k: v.detach().clone() for k, v in m.state_dict().items()} for m in modules]
 
-        rho_val = U_guess_df.at[(N_val, T_key), 'rho']  # shape: (1, Nx) or (Nx,)
-        
-        # Ensure correct shape (1, Nx)
-        if rho_val.ndim == 1:
-            rho_val = rho_val.unsqueeze(0)
+def restore(modules, snap):
+    for m, sd in zip(modules, snap):
+        m.load_state_dict(sd)
 
-        rho_list.append(rho_val.to(batch['rho'].device))  # move to same device
+def save_model(dirname):
+    os.makedirs(dirname, exist_ok=True)
+    save_state_dict_cpu(model.dnn_g_fn.state_dict(), os.path.join(dirname, "dnn_g_fn.dict"))
+    save_state_dict_cpu(model.dnn_rep_fn.state_dict(), os.path.join(dirname, "dnn_rep_fn.dict"))
+    save_state_dict_cpu(model.wda_fn.state_dict(), os.path.join(dirname, "wda_fn.dict"))
 
-    # Stack to shape: (B, 1, Nx)
-    return torch.stack(rho_list, dim=0)
+def plot_state(rho, history, tag):
+    for b in range(rho_d.shape[0]):
+        plt.plot(model.mesh["x"].cpu(), rho_d[b,0,...].cpu().detach(), color = "black", label=f"rho_d")
+        plt.plot(model.mesh["x"].cpu(), (rho[b,0,...]).cpu().detach(), "-.", color = "red", label=f"rho_nn")
+        plt.plot(batch['x'].cpu().detach(), (batch['rho_0'][b,0,...]).cpu().detach(), "--", color = "grey", label=f"rho_0")
+        plt.xlabel("x")
+        plt.legend()
+        T_b = 1/model.eq_params["beta"][b].item()
+        plt.title(f"T = {T_b:.2f}, N = {N_val[b].cpu().item():.2f}")
+        plt.grid()
+        plt.savefig(os.path.join(plotdir_rho, f"rho_{tag}_N{N_val[b].item():.0f}_T_{T_b:.2f}.png"))
+        plt.close()
 
-for idx, row in U_guess_df.iterrows():
-    N_val, T_key = profile_nt_index_key(idx[0], idx[1])
-    x_g = row["x"]
-    rho_g = row["rho"].squeeze()
-    if x_g.ndim > 1:
-        x_g = x_g.flatten()
-    if rho_g.ndim > 1:
-        rho_g = rho_g.flatten()
-    plt.figure()
-    #plt.plot(data_md.df_0.copy()[(N_val, T_key), "x"].cpu().numpy(), data_md.df_0.copy()[(N_val, T_key), "rho"].cpu().numpy(), color="C0", label=r"$U_{\mathrm{guess}}$ init")
-    plt.plot(x_g.cpu().numpy(), rho_g.cpu().detach().numpy(), color="C0", label=r"$U_{\mathrm{guess}}$ init")
-    plt.xlabel(r"$x$")
-    plt.ylabel(r"$\rho$")
-    plt.title(rf"Initial guess $U_{{\mathrm{{guess}}}}$ (N={N_val}, T={T_key})")
+    plt.plot(np.log10(history), label=f"loss_data")
+    plt.xlabel("Step")
+    plt.ylabel("log10(loss)")
     plt.legend()
     plt.grid()
-    plt.savefig(
-        os.path.join(plotdir_rho, f"U_guess_init_N{N_val:.2f}_T_{T_key:.2f}.png")
-    )
+    plt.savefig(os.path.join(plotdir, f"loss_{tag}.png"))
     plt.close()
-print("Initialized guess for the training set:", U_guess_df.head())
-print(f"Wrote U_guess init figure(s) under {plotdir_rho}")
+
+
 
 # ------------------------------------------------------------------------------
 # ----------------------------- TRAINING LOOP ----------------------------------
 # ------------------------------------------------------------------------------
+all_modules = [model.dnn_g_fn, model.dnn_rep_fn, model.wda_fn]
 
-logloss_history = []
-loglossprior_history = []
-loglossepoch_history = []
-avgloss_history = [0.]
-t0 = time.time()
-for epoch in range(epochs):
-    epoch_loss = 0
-    epoch_lossprior = 0
+def train_stage(tag, stages, modules):
+    # Train mode / gradients for the modules of this stage only
+    params = []
+    for m in all_modules:
+        on = m in modules
+        m.train() if on else m.eval()
+        for p in m.parameters():
+            p.requires_grad = on
+            if on: params.append(p)
 
-    # Train mode
-    if TRAIN_DNN:     model.dnn_fn.train(); 
-    if TRAIN_DNN:     model.dnn_g_fn.train(); 
-    if TRAIN_DNN_REP: model.dnn_rep_fn.train()
-    if TRAIN_WDA:     model.wda_fn.train()
+    global rho_prev
+    rho_prev = None
+    out_fwd = solve_forward(rho_d)
+    e = rel_l2(out_fwd["U"], rho_d).cpu().numpy()
+    print(f"\n=== stage {tag}: {len(params)} tensors / {sum(p.numel() for p in params)} params, stages = {stages}")
+    print(f"before: rel-L2 mean {e.mean():.4f} {np.round(e, 4).tolist()}   max|res| = {out_fwd['res_max']:.2e}")
 
-    model.optimizer_dnn.zero_grad()
-    model.optimizer_dnn_rep.zero_grad()
-    model.optimizer_fno.zero_grad()
+    history = []
+    best, best_snap = np.inf, snapshot(all_modules)
+    for lr, n_steps in stages:
+        optimizer = torch.optim.Adam(params, lr=lr)
+        fires = 0
+        floor = np.inf
+        for step in range(n_steps):
+            optimizer.zero_grad(set_to_none=True)
+            ti = time.time()
 
-    batch_count = 0
-    batch_loss = 0.
-    batch_lossprior = 0.
-    n_batches = len(dataloader_md)
-    for batch in dataloader_md:
-        # Extract data
-        rho_d = batch['rho']             # [B, 1, Nx]
-        rho_guess_batch = batch['rho_0']       # [B, 1, Nx]
-        beta_val = batch["beta"]         # [B, 1]
-        T_val = batch["T"]         # [B, 1]
-        N_val = batch["N"]               # [B, 1]
-        N_target = torch.sum(batch["rho"], dim=-1)*dx   # [B, 1]
-        
-        # TMD coordinates
-        beta = beta_val     
-        N = N_target        #N_MD/ 20**2 --> Area MD simulation box
-        model.eq_params["beta"] = beta  # [B, 1]
-        model.eq_params["mu"] = N       # [B, 1]
+            # ---------------------------------------------------------------- #
+            # FORWARD PROBLEM
+            out_fwd = solve_forward(rho_d)
 
-        # Running simulation for T,N....
-        ti = time.time()
+            # ---------------------------------------------------------------- #
+            # ADJOINT PROBLEM
+            outA = adjoint(
+                            model = model,
+                            U_fwd = out_fwd["U"],
+                            U_data = rho_d,
+                            verbose = 0,
+            )
+            loss = outA["Loss"].item()
+            if np.isfinite(loss) and not np.isfinite(floor):
+                floor = loss
 
+            # ---------------------------------------------------------------- #
+            # GUARD: back to the best parameters with a smaller step if the loss blew up
+            if not np.isfinite(loss) or (np.isfinite(best) and loss > guard_factor*max(best, 1e-12) and loss > floor):
+                fires += 1
+                lr *= guard_backoff
+                print(f"guard {fires}/{max_guard_fires} at step {step}: loss = {loss:.3e}, best = {best:.6e}, lr -> {lr:.2e}")
+                restore(all_modules, best_snap)
+                rho_prev = None
+                optimizer = torch.optim.Adam(params, lr=lr)
+                if fires >= max_guard_fires:
+                    break
+                continue
+            history.append(loss)
 
-        # ---------------------------------------------------------------- #
-        # FORWARD PROBLEM
-        rho_guess = get_rho_from_U_guess_df(U_guess_df, batch)  # [B, 1, Nx]        
-        #print(rho_guess)
-        if epoch==0 and 0: sol["JACOBIAN"] = "STABLE"
-        else: sol["JACOBIAN"] = "EXACT"
-        out_fwd = newton(
-                    model=model,
-                    U_guess=rho_guess, #U_guess_dict[beta_val] ,
-                    detach_tensors=True,
-                    max_steps=newton_max_steps,
-                    tol=newton_tol ,
-                    alpha= newton_alpha_first if (epoch == 0 and newton_alpha_first is not None) else newton_alpha,
-                    verbose= 1 if epoch==0 else newton_verbose,
-                    plot=True,
-                    )
-        update_U_guess_df(U_guess_df, batch, out_fwd["U"])
+            # best parameters = the ones the loss was evaluated with, before the update
+            if loss < best:
+                best, best_snap = loss, snapshot(all_modules)
+                if SAVE_MODEL:
+                    save_model(ml_dicts_dir)
 
-        
-        # ---------------------------------------------------------------- #
-        # ADJOINT PROBLEM
-        outA = adjoint(
-                        model = model,
-                        U_fwd = out_fwd["U"],
-                        U_data = rho_d,
-                        verbose = 1 if epoch==0 else newton_verbose,
-        )
+            # ---------------------------------------------------------------- #
+            # GRADIENTS: outA["grad"] backpropagates dLoss/dtheta
+            outA["grad"].backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(params, clip_norm).item()
+            optimizer.step()
 
+            if step%log_every==0 or step==n_steps-1:
+                print(f"stage {tag} lr {lr:.1e} step {step:5d}: loss = {loss:.6e}, best = {best:.6e}, |grad| = {grad_norm:.3e}, "
+                      f"newton max|res| = {out_fwd['res_max']:.1e}, fallbacks = {n_fallbacks}  [{time.time()-ti:.1f}s]", flush=True)
+                plot_state(out_fwd["U"], history, tag)
 
-        # ---------------------------------------------------------------- #
-        # LOSS & GRADIENTS
-        # Prior WDA
-        w_real = model.wda_fn.blocks[0].spectral_conv.real_weight
-        w_imag = model.wda_fn.blocks[0].spectral_conv.imag_weight
-        k = torch.linspace(0.1, 10, len(w_real), device=w_real.device)
-        var =  (1/k)**2
-        
-        loss_prior_wda = weight_decay*((w_real**2 + w_imag**2) / var).mean()
-
-        # Adjoint
-        grad_adjoint = (outA["grad"] ).mean() 
-
-        # Total
-        grad = (grad_adjoint + loss_prior_wda)/len(data_md)     
-        grad.backward(retain_graph=False)
-
-        # Store the loss
-        batch_loss += outA["Loss"].item()/len(data_md)
-        batch_lossprior += loss_prior_wda.cpu().item()/len(data_md)
-        batch_count +=1
-
-        # Plot
-        if (epoch)%10==0:
-            os.makedirs(plotdir, exist_ok=True)
-            os.makedirs(plotdir_rho, exist_ok=True)
-            print("Plotting in", plotdir, "...")
-            for b in range(rho_d.shape[0]):
-                plt.plot(model.mesh["x"].cpu(), rho_d[b,0,...].cpu().detach(), color = "black", label=f"rho_d")
-                plt.plot(model.mesh["x"].cpu(), (out_fwd["U"][b,0,...]).cpu().detach(), "-.", color = "red", label=f"rho_nn")
-                # plt.plot(batch['x'].cpu().detach(), (rho_guess[b,0,...]).cpu().detach(), "-.", color = "orange", label=f"rho_guess")
-                plt.plot(batch['x'].cpu().detach(), (batch['rho_0'][b,0,...]).cpu().detach(), "--", color = "grey", label=f"rho_0")
-                plt.xlabel("x")
-                plt.legend()
-                plt.title(f"T = {1/model.eq_params["beta"][b].cpu().item():.2f}, N = {N_val[b].cpu().item():.2f}")
-                plt.grid(); #plt.xlim(-30, -25)
-                plt.savefig(os.path.join(plotdir_rho, f"rho_temp_N{N_val[b].item():.2f}_T_{1/model.eq_params["beta"][b].item():.2f}.png"))
-                plt.close()
-                
-
-            plt.plot(logloss_history, label=f"loss_data")
-            # plt.plot(loglossprior_history, label=f"loss_prior_wda")
-            plt.xlabel("Epoch")
-            plt.ylabel("log10(loss)")
-            plt.legend()
-            plt.grid()
-            plt.savefig(os.path.join(plotdir, "loss.png"))
-            plt.close()
-
-    logloss_history.append(np.log10(batch_loss))
-    loglossprior_history.append(np.log10(batch_lossprior))
-    # loglossepoch_history.append(sum(logloss_history[:-n_batches])/n_batches)
-
-    
-    model.optimizer_dnn.step()
-    model.optimizer_dnn_rep.step()
-    model.optimizer_fno.step()
-
-    # Scheduler
-    if (100*epoch/epochs)%5==0 and epoch!=0: model.scheduler_dnn.step()
-    if (100*epoch/epochs)%5==0 and epoch!=0: model.scheduler_dnn_rep.step()
-    if (100*epoch/epochs)%5==0 and epoch!=0: model.scheduler_fno.step()
-
-
-
+    # leave the best parameters in the model
+    restore(all_modules, best_snap)
     if SAVE_MODEL:
-        save_state_dict_cpu(model.dnn_fn.state_dict(), os.path.join(ml_dicts_dir, "dnn_fn.dict"))
-        save_state_dict_cpu(model.dnn_g_fn.state_dict(), os.path.join(ml_dicts_dir, "dnn_g_fn.dict"))
-        save_state_dict_cpu(model.dnn_rep_fn.state_dict(), os.path.join(ml_dicts_dir, "dnn_rep_fn.dict"))
-        save_state_dict_cpu(model.wda_fn.state_dict(), os.path.join(ml_dicts_dir, "wda_fn.dict"))
-        with open(os.path.join(ml_dicts_dir, "U_guess.pkl"), 'wb') as file:
-            pickle.dump(tensors_to_cpu_for_storage(U_guess_df), file)
-        if epoch%25==0 and model.sol["SAVE_INTERMEDIATE_MODELS"]:
-            inter_dir = os.path.join(ml_intermediate_dir, f"ml_dicts{epoch}")
-            os.makedirs(inter_dir, exist_ok=True)
-            save_state_dict_cpu(model.dnn_fn.state_dict(), os.path.join(inter_dir, "dnn_fn.dict"))
-            save_state_dict_cpu(model.dnn_g_fn.state_dict(), os.path.join(inter_dir, "dnn_g_fn.dict"))
-            save_state_dict_cpu(model.dnn_rep_fn.state_dict(), os.path.join(inter_dir, "dnn_rep_fn.dict"))
-            save_state_dict_cpu(model.wda_fn.state_dict(), os.path.join(inter_dir, "wda_fn.dict"))
-            with open(os.path.join(inter_dir, "U_guess.pkl"), 'wb') as file:
-                pickle.dump(tensors_to_cpu_for_storage(U_guess_df), file)
+        save_model(ml_dicts_dir)
+    if SAVE_INTERMEDIATE_MODELS:
+        save_model(os.path.join(ml_intermediate_dir, f"ml_dicts_{tag}"))
+    out_fwd = solve_forward(rho_d)
+    e = rel_l2(out_fwd["U"], rho_d).cpu().numpy()
+    print(f"after:  rel-L2 mean {e.mean():.4f} {np.round(e, 4).tolist()}   best loss = {best:.6e}  ({len(history)} steps)")
+    plot_state(out_fwd["U"], history, tag)
+    return best, history
 
 
+t0 = time.time()
+modules_smooth = [m for m, flag in ((model.dnn_g_fn, TRAIN_DNN), (model.dnn_rep_fn, TRAIN_DNN_REP)) if flag]
+modules_wda = modules_smooth + ([model.wda_fn] if TRAIN_WDA else [])
 
-    avg_loss = sum(logloss_history[:-n_batches]) 
-    avg_lossprior = sum(loglossprior_history[:-n_batches])
-    avgloss_history.append(avg_loss)
-    
-    if (epoch)%10==0: print(f"\n\n\n\nEpoch {epoch+1}: Lo ss = {avg_loss:.3e}, Loss prior = {avg_lossprior:.3e},   LR = {model.optimizer_dnn.param_groups[0]["lr"]:.2e}\n")#,\t\ttheta = {model.nn_fn.fc2.weights.data[...,0].item():.6f},{model.nn_fn.fc2.weights.data[...,1].item():.6f}")
+if not RESTART_ML_MODEL:
+    sol["USE_WDA"] = False
+    train_stage("smooth", stage_smooth, modules_smooth)
+sol["USE_WDA"] = True
+train_stage("wda", stage_wda, modules_wda)
 
 tf = time.time()
 print(f"Total time:{tf-t0:.1f}")

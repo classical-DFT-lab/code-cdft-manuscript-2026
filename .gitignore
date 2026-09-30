@@ -1,47 +1,22 @@
-# Ignore all files in output/ and dataset/, but allow .gitkeep to preserve folder structure
-# output/**
-# !output/**/
-
-# Ignore these paths completely
-ncdft1.zip
-ncdft2.zip
+# Generated data: everything the scripts write under data/dataset/pkl/ is rebuilt from the CSVs
+# (binary pickles and TorchScript regressors are not portable across library versions)
 **/*.pkl
+**/*.pt
+data/dataset/pkl/**
+!data/dataset/pkl/**/
+!data/dataset/pkl/**/.gitkeep
 
-# Ignore data artifacts in src/
-src/**/*.pkl
-src/**/*.log
-src/**/*.out
-src/**/*.pyc
-src/**/*.ipynb
-src/deprecated
-src/local
+# Local training runs (the published weights are data/ml_model/ml_dicts/*.dict)
+data/ml_model/intermediate_models/
 
-data/ml_model/ml_dicts_*
-data/ml_model/intermediate_models
-data/dataset/md_planar_wc/local
-data/dataset/pkl/bulk_tmd/** 
-data/dataset/pkl/ 
+# Scratch output of the continuation scripts (the plots in output/ are part of the repository)
+output/**/temp/
 
-output/**
-docs/** 
-
-!output/
-!output/bulk_tmd/
-!output/bulk_tmd/phase_curve.png
-!output/plot_train/
-!output/plot_train/loss.png
-!output/plot_train/rho/
-!output/plot_train/rho/rho_N*
-!output/plot_lg_isotherm/
-!output/plot_lg_isotherm/gamma_lg/
-!output/plot_lg_isotherm/gamma_lg/gamma_lg_cdft_vs_md.png
-
-!data/ml_model/ml_dicts/U_guess.pkl
-!data/**/.gitkeep
-
-
-#To be added:
-src/tobeadded
-
-
-
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.log
+*.out
+.ipynb_checkpoints/
+.DS_Store

@@ -65,11 +65,6 @@ def CDFT_MODEL(eq_params, mesh, sol):
             Computes F_ex's gradients using backpropagation.
             """
 
-            if self.sol["USE_MODEL"]:
-                self.eq_params["pred_dnn"] = self.dnn_fn(self.eq_params["beta"])#.double())  # [B, 1]
-                self.eq_params["sigma_attr"] = 1. + 0.01*self.eq_params["pred_dnn"][...,0:1]  #[B, 1] 
-                self.eq_params["eps_attr"] =   1. + 0.01*self.eq_params["pred_dnn"][...,1:2]  #[B, 1]
-
             # REPULSIVE
             phiR = self.phiR(rho)   # (B, 1, Nx)
             #                                     (B, 1, Nx)
@@ -146,11 +141,6 @@ def CDFT_MODEL(eq_params, mesh, sol):
             """
             Computes F_ex's gradients using backpropagation.
             """
-
-            if self.sol["USE_MODEL"]:
-                self.eq_params["pred_dnn"] = self.dnn_fn(self.eq_params["beta"])#.double())  # [B, 1]
-                self.eq_params["sigma_attr"] = 1. + 0.01*self.eq_params["pred_dnn"][...,0:1]  #[B, 1] 
-                self.eq_params["eps_attr"] =   1. + 0.01*self.eq_params["pred_dnn"][...,1:2]  #[B, 1]
 
             # REPULSIVE
             phiR = self.phiR_bulk(rho)   # (B, 1,)

@@ -159,10 +159,10 @@ def update_model(x_, rho_, T_, eq_params_, mesh_=None, sol_=None, ml_state_dicts
     sd = ml_state_dicts_ if ml_state_dicts_ is not None else None
     setDNN(model, LR=0.0, state_dicts=sd)
     setDNNRep(model, LR=0.0, state_dict=sd["dnn_rep_fn"] if sd else None)
-    setWDA(model, LR=0.0, modes=150, state_dict=sd["wda_fn"] if sd else None)
+    setWDA(model, LR=0.0, modes=100, state_dict=sd["wda_fn"] if sd else None)
 
-    if hasattr(model, "dnn_fn") and model.dnn_fn is not None:
-        model.dnn_fn.eval()
+    if hasattr(model, "dnn_g_fn") and model.dnn_g_fn is not None:
+        model.dnn_g_fn.eval()
     if hasattr(model, "dnn_rep_fn") and model.dnn_rep_fn is not None:
         model.dnn_rep_fn.eval()
     if hasattr(model, "wda_fn") and model.wda_fn is not None:
@@ -426,10 +426,10 @@ def newton_critical_point(
         sd = ml_state_dicts_
         setDNN(model, LR=0.0, state_dicts=sd)
         setDNNRep(model, LR=0.0, state_dict=sd["dnn_rep_fn"] if sd else None)
-        setWDA(model, LR=0.0, modes=150, state_dict=sd["wda_fn"] if sd else None)
+        setWDA(model, LR=0.0, modes=100, state_dict=sd["wda_fn"] if sd else None)
 
-        if hasattr(model, "dnn_fn") and model.dnn_fn is not None:
-            model.dnn_fn.eval()
+        if hasattr(model, "dnn_g_fn") and model.dnn_g_fn is not None:
+            model.dnn_g_fn.eval()
         if hasattr(model, "dnn_rep_fn") and model.dnn_rep_fn is not None:
             model.dnn_rep_fn.eval()
         if hasattr(model, "wda_fn") and model.wda_fn is not None:

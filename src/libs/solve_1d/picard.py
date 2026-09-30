@@ -20,12 +20,13 @@ def picard(model,
         - U_guess:  starting solution
         - deltaU:   norm of the discrepancy between Un - Un-1
     """
-    U_old = U_guess
+    U_old = U_guess.detach()
     delta_U_norm = 1
     i=0
     while i < max_steps and delta_U_norm > tol:
         out_k = model.residual( U_old,
-                                compute_Jac = True,
+                                compute_Jac = False,
+                                detach_tensors = True,
                                 )
 
         res = out_k["res"]
@@ -33,9 +34,9 @@ def picard(model,
         # Solve linear system Jac_op * delta_rho = -res
         # -> delta_rho = - Jac_op^-1 * res
         delta_U = - res  # (h0 - rho_old)
-        delta_U_norm = torch.abs(delta_U).mean().item()
+        delta_U_norm = torch.abs(delta_U).max().item()
 
-        U_new = U_old + delta_U * alpha
+        U_new = (U_old + delta_U * alpha).detach()
 
         if verbose:
             print("Picard step:", i,
@@ -47,14 +48,17 @@ def picard(model,
     # After final iteration, store results in self.sol
     out = model.h0( U_old,
                     compute_Jac = False,
+                    detach_tensors = True,
                     )
-    out["U"] = U_new
+    out["U"] = U_new.detach()
     out["U_guess"] = U_guess
     out["deltaU"] = delta_U_norm
+    out["res_max"] = delta_U_norm
 
-    print("\nTotal Picard steps:", i,
-        "\tdelta norm:", delta_U_norm,
-        "\t\tU_new norm:",torch.abs(U_new.detach()).mean().item())
-    print("----------------------------------------")
+    if verbose:
+        print("\nTotal Picard steps:", i,
+            "\tdelta norm:", delta_U_norm,
+            "\t\tU_new norm:",torch.abs(U_new.detach()).mean().item())
+        print("----------------------------------------")
     return out
 

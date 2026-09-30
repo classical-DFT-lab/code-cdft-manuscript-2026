@@ -192,9 +192,9 @@ class ATTRACTIVE_FREE_ENERGY():
         # psi and g at 1D distances (_psi_attr returns (B, 1, N_r) for 1D input; squeeze to (B, N_r))
         psi_r = self._psi_attr_bulk(r_grid)  # (B, N_r)
         if self.sol["USE_MODEL"]:
-            g_r = (self.dnn_g_fn(r_grid.unsqueeze(-1))[..., 0]
-            #* torch.exp(-(r_grid/5)**2)
-            ).unsqueeze(0)  # (1, N_r)
+            beta = self.eq_params["beta"]  # (B, 1)
+            r_b = r_grid[None, :].expand(beta.shape[0], -1)  # (B, N_r)
+            g_r = self.dnn_g_fn(torch.stack([r_b, beta.expand_as(r_b)], dim=-1))[..., 0]  # (B, N_r)
             kernel = (1 + 1e-3 * g_r) * psi_r  # (B, N_r)
         else:
             kernel = psi_r # (B, N_r)
@@ -226,9 +226,9 @@ class ATTRACTIVE_FREE_ENERGY():
         # psi and g at 1D distances (_psi_attr returns (B, 1, N_r) for 1D input; squeeze to (B, N_r))
         psi_r = self._psi_attr(r_grid).squeeze(1)  # (B, N_r)
         if self.sol["USE_MODEL"]:
-            g_r = (self.dnn_g_fn(r_grid.unsqueeze(-1))[..., 0]
-            #* torch.exp(-(r_grid/5)**2)
-            ).unsqueeze(0)  # (1, N_r)
+            beta = self.eq_params["beta"]  # (B, 1)
+            r_b = r_grid[None, :].expand(beta.shape[0], -1)  # (B, N_r)
+            g_r = self.dnn_g_fn(torch.stack([r_b, beta.expand_as(r_b)], dim=-1))[..., 0]  # (B, N_r)
             kernel = (1 + 1e-3 * g_r) * psi_r
         else:
             kernel = psi_r
@@ -253,10 +253,9 @@ class ATTRACTIVE_FREE_ENERGY():
         LJ_xy = self._psi_attr(xy_abs)   # (B, Nx, Nx)
 
         if self.sol["USE_MODEL"]:
-            g = (
-                self.dnn_g_fn(xy_abs[..., None])[None, ..., 0]
-                # * torch.exp(-(xy_abs/5)**2) [None,...]
-                ) # (B, Nx, Nx)
+            beta = self.eq_params["beta"]  # (B, 1)
+            u = xy_abs[None, ...].expand(beta.shape[0], -1, -1)  # (B, Nx, Nx)
+            g = self.dnn_g_fn(torch.stack([u, beta[..., None].expand_as(u)], dim=-1))[..., 0]  # (B, Nx, Nx)
         else:
             g = 0
 
@@ -274,7 +273,7 @@ class ATTRACTIVE_FREE_ENERGY():
 
 
     # def DFA(self, rho):
-    #     # dFA/drho:= conv(rho * psi_attr * g) [FMT]
+    #     # dFA/drho:= conv(rho * psi_attr * g)
     #     x = self.mesh["x"]
     #     dx = self.mesh["dx"]  #(Nx,)
     #     xy_abs = torch.abs(x[:, None] - x[None, :])  # (Nx,Nx)

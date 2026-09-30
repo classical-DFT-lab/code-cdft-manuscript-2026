@@ -55,7 +55,7 @@ def Omega(
     gamma_lg = params["gamma_lg"]
     gamma_wl = params["gamma_wl"]
     gamma_wg = params["gamma_wg"]
-    l_max = params["l_max"]
+    l_min = params["l_min"]
     Winf = params["Winf"]
     Lr = params["Lr"]
     A_tot = torch.tensor(torch.pi * Lr**2).to(t0_.dtype)
@@ -74,7 +74,7 @@ def Omega(
     # Binding potential contribution
     if W_fn is None: I1 = 0.
     else:
-        l0 = l_max
+        l0 = l_min  # film thickness at the contact line: the minimum of W(l)
         t0_abs = torch.abs(t0_) #(Nt,)
         dT = (torch.pi/2 - t0_abs)/Ndisc # (Nt,)
         t_grid = t0_abs[...,None] + dT[...,None]*torch.arange(0, Ndisc+1, dtype=t0_.dtype)[None,...]  #(Nt,Ndisc)

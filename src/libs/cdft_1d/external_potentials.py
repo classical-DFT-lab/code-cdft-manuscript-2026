@@ -43,3 +43,21 @@ def LJ126(x, x_wall, Ew, sigmaw):
 def HW(x, x_wall, Ew=None, sigmaw=None):
     Vext = ((x < x_wall).to(dtype=x.dtype) * 1e6)[None, :]
     return Vext
+
+
+def Morse(x, x_wall, D0, alpha, r0):
+    Vext = (
+        D0
+        * (
+            torch.exp(-2*alpha*(x - x_wall - r0))
+            - 2*torch.exp(-alpha*(x - x_wall - r0))
+        )
+    )[None, :]
+    return Vext
+
+def Harmonic(x, x_wall, kappa, xc, g):
+    Vext = (
+        kappa * (xc - (x - x_wall))**2 * ((x - x_wall) < xc).to(dtype=x.dtype)
+        + g * (x - x_wall)
+    )[None, :]
+    return Vext

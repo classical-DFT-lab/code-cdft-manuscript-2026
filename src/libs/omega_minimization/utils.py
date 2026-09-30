@@ -9,24 +9,18 @@ from libs.omega_minimization.spherical_cap.macro_omega_3D import R_constrained a
 
 
 # ---------------------------------------------------------------------------
-# Regressor locations: new layout written by src/compute_adsorption_work.py,
-# with fallback to the legacy postproc/ layout (retro-compatibility with the
-# old notebooks and any cwd-relative invocation from src/).
+# Regressor locations: written by compute_contact_angle.py
+# (libs/omega_minimization/adsorption_work.py) for each wall.
 # ---------------------------------------------------------------------------
 _REPO_ROOT = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")
 )
 
-_W_REGRESSOR_DIRS = [
-    os.path.join(_REPO_ROOT, "data", "dataset", "pkl", "profiles_wl_wc", "work_regressor_wl_wc"),
-    os.path.join(_REPO_ROOT, "data", "dataset", "postproc", "work_regressor_Xb"),
-    "../data/dataset/postproc/work_regressor_Xb",
-]
-_MU0_REGRESSOR_DIRS = [
-    os.path.join(_REPO_ROOT, "data", "dataset", "pkl", "profiles_wl_wc", "mu0_regressor_wl_wc"),
-    os.path.join(_REPO_ROOT, "data", "dataset", "postproc", "mu0_regressor"),
-    "../data/dataset/postproc/mu0_regressor",
-]
+def _W_regressor_dirs(wall):
+    return [os.path.join(_REPO_ROOT, "data", "dataset", "pkl", f"profiles_wl_{wall}", f"work_regressor_wl_{wall}")]
+
+def _MU0_regressor_dirs(wall):
+    return [os.path.join(_REPO_ROOT, "data", "dataset", "pkl", f"profiles_wl_{wall}", f"mu0_regressor_wl_{wall}")]
 
 
 def _find_regressor(dirs, fname):
@@ -37,31 +31,30 @@ def _find_regressor(dirs, fname):
     raise FileNotFoundError(f"{fname} not found in any of: {dirs}")
 
 
-def load_work_regressor(T_star):
-    path = _find_regressor(_W_REGRESSOR_DIRS, f"work_regressor_{T_star:.2f}.pt")
+def load_work_regressor(T_star, wall="wc"):
+    path = _find_regressor(_W_regressor_dirs(wall), f"work_regressor_{T_star:.2f}.pt")
     return torch.jit.load(path), path
 
 
-def load_mu0_regressor(T_star):
-    path = _find_regressor(_MU0_REGRESSOR_DIRS, f"mu0_regressor_{T_star:.2f}.pt")
+def load_mu0_regressor(T_star, wall="wc"):
+    path = _find_regressor(_MU0_regressor_dirs(wall), f"mu0_regressor_{T_star:.2f}.pt")
     return torch.jit.load(path), path
 
 
-def upload_gammas_in_pc_(pc_nn, T_list, plotpath=None):
+def upload_gammas_in_pc_(pc_nn, T_list, plotpath=None, wall="wc"):
     gamma_wl_list, gamma_lg_list, gamma_wg_list = [], [], []
     for i, T_i in enumerate(T_list):
-        W_fn, w_path = load_work_regressor(T_i)
+        W_fn, w_path = load_work_regressor(T_i, wall)
         print("Loaded W regressor for T =", T_i, "from path:", w_path)
         Wmin = W_fn.min["W_min"]
-        # Winf is stored by the fitting script at l = validity; evaluating the
-        # spline mid-window (0.5*validity) underestimated the plateau.
+        # Winf is the thick-film plateau of the regressor
         Winf = float(W_fn.Winf)
         W0=W_fn(torch.tensor([0.]).double()).squeeze().item()
         
         
-        gamma_wg = W0
+        #gamma_wg = W0
         #gamma_wg = Wmin
-        #gamma_wg = W_fn.wg["W_wg"].item()
+        gamma_wg = W_fn.wg["W_wg"].item()  # work at the wall-gas state of the isotherm
 
         l_max, Wmax = W_fn.max["l_max"], W_fn.max["W_max"]
         l_min, Wmin = W_fn.min["l_min"], W_fn.min["W_min"]
@@ -91,8 +84,8 @@ def upload_gammas_in_pc_(pc_nn, T_list, plotpath=None):
     plt.close()
 
 shift0 =0  # shift in l for W and mu0 functions
-def compute_W_fn(T_star):
-    W_nn, _ = load_work_regressor(T_star)
+def compute_W_fn(T_star, wall="wc"):
+    W_nn, _ = load_work_regressor(T_star, wall)
     W_nn.eval()
 
     lmax = W_nn.max["l_max"]
@@ -141,9 +134,9 @@ def compute_W_fn(T_star):
 
     return W_fn, dW_fn, W_nn
 
-def compute_mu0_fn(T_star):
-    mu0_nn, _ = load_mu0_regressor(T_star)
-    W_nn, _ = load_work_regressor(T_star)
+def compute_mu0_fn(T_star, wall="wc"):
+    mu0_nn, _ = load_mu0_regressor(T_star, wall)
+    W_nn, _ = load_work_regressor(T_star, wall)
     mu0_nn.eval()
     shift = W_nn.min["l_min"]
     shift = shift0

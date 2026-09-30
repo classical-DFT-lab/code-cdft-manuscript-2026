@@ -2,10 +2,11 @@
 """
 Compute liquid-gas surface tension gamma_lg from isotherm trajectories.
 
-This script ports the workflow from src/isotherm_lg.ipynb into a standalone script.
-It estimates 2*gamma_lg as the area under omega(x)-baseline over the interface and
-stores gamma_lg = area/2 for each temperature. It also writes gamma_lg_cdf_vs_md_N*.png
-comparing cDFT (T from index 2 onward) to MD reference data from isotherm_lg.ipynb.
+Estimates 2*gamma_lg as the area under omega(x) - baseline over the two liquid-gas interfaces of
+the isotherms of lg_continuation.py and stores gamma_lg = area/2 for each temperature, together
+with the coexistence densities, in data/dataset/pkl/bulk_tmd/pc_md_operative_with_gamma.pkl.
+It also writes gamma_lg_cdf_vs_md_N*.png comparing cDFT (T from index 2 onward) to the MD
+surface tension of Stephan et al. (GAMMA_T_MD below).
 """
 from __future__ import annotations
 
@@ -55,7 +56,7 @@ DEVICE_KIND = "auto"
 TORCH_DTYPE = torch.float32
 RESTART_ML_MODEL = 1
 USE_MODEL = 1
-USE_DBH_DIAMETER = 0
+USE_DBH_DIAMETER = 1
 TRAIN_DNN = 0
 TRAIN_WDA = 0
 SAVE_MODEL = 0
@@ -90,7 +91,7 @@ dft_type = "LDA"
 str_param = "N"
 Lambda = 1.0
 
-# MD reference surface tension (same table as isotherm_lg.ipynb)
+# MD reference surface tension (Stephan et al.)
 GAMMA_T_MD = [
     (0.65, 0.670),
     (0.7, 0.584),
@@ -106,7 +107,7 @@ GAMMA_T_MD = [
 
 def plot_gamma_lg_cdf_vs_md(gamma_series: list[tuple[float, float]], plot_dir: str, n_key: int) -> None:
     """
-    Compare cDFT gamma_lg vs MD reference (isotherm_lg.ipynb).
+    Compare cDFT gamma_lg vs the MD reference.
     Uses T_list[2:], gamma_lg[2:] for cDFT when enough points exist.
     """
     if not gamma_series:
@@ -157,7 +158,7 @@ def area_under_interface(
     absolute: bool = False,
 ):
     """
-    Estimate interface area under (omega - baseline) using notebook logic.
+    Estimate the interface area under (omega - baseline).
 
     Returns:
         area: integral value over detected interface support.
@@ -188,7 +189,6 @@ def area_under_interface(
     if idx.size == 0:
         return 0.0, baseline, (None, None), tol
 
-    # Keep the same support-selection heuristic used in the notebook.
     i0 = int(idx[0])
     i1 = int(npts - idx[0])
     y = np.abs(w_corr[i0 : i1 + 1]) if absolute else w_corr[i0 : i1 + 1]
@@ -260,10 +260,10 @@ def build_cdft_context(x_t: torch.Tensor, rho_init_t: torch.Tensor, t_val: float
     model = CDFT(eq_params, mesh, sol)
     setDNN(model, LR=0.0, state_dicts=ml_state_dicts)
     setDNNRep(model, LR=0.0, state_dict=ml_state_dicts["dnn_rep_fn"] if ml_state_dicts else None)
-    setWDA(model, LR=0.0, modes=150, state_dict=ml_state_dicts["wda_fn"] if ml_state_dicts else None)
-    if hasattr(model, "dnn_fn") and model.dnn_fn is not None:
-        model.dnn_fn.eval()
-        for p in model.dnn_fn.parameters():
+    setWDA(model, LR=0.0, modes=100, state_dict=ml_state_dicts["wda_fn"] if ml_state_dicts else None)
+    if hasattr(model, "dnn_g_fn") and model.dnn_g_fn is not None:
+        model.dnn_g_fn.eval()
+        for p in model.dnn_g_fn.parameters():
             p.requires_grad = False
     if hasattr(model, "dnn_rep_fn") and model.dnn_rep_fn is not None:
         model.dnn_rep_fn.eval()
@@ -379,7 +379,7 @@ def main():
     pc_df = load_pickle(
         PHASE_CURVE_PKL,
         description="Phase curve dataframe",
-        hint="Expected ../data/dataset/postproc/phase_curve_nn.pkl",
+        hint="Run compute_bulk_tmd.py first (writes data/dataset/pkl/bulk_tmd/pc_nn_operative.pkl)",
     )
     if "gamma_lg" not in pc_df.columns:
         pc_df["gamma_lg"] = np.nan
@@ -426,7 +426,7 @@ def main():
         pc_df.loc[t_i, "rho_v"] = float(rho_last[int(rho_last.shape[-1] * 0.10)])
         pc_df.loc[t_i, "gamma_lg"] = gamma_selected
 
-        # Diagnostic plot like notebook: omega-baseline and rho profile.
+        # Diagnostic plot: omega - baseline and rho profile.
         plt.figure(figsize=(7, 4))
         w_corr = omega_last - baseline
         plt.plot(x, w_corr, label=r"$\omega(x)-\omega_b$")

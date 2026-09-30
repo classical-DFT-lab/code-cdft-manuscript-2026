@@ -22,7 +22,7 @@ def adjoint(model,
                             compute_Jac = True,
                             detach_tensors = False,
                             )
-    Jac_op = out_fwd["Jac_op"]
+    Jac_op = out_fwd["Jac_op"].detach()  # only the residual carries the dependence on the parameters
     res = out_fwd["res"]
         
     Jac_op_t = torch.einsum("buij->buji", Jac_op)  # (BS, 1, Nx, Nx)
@@ -51,7 +51,7 @@ def adjoint(model,
     if verbose:
         print("Adjoint step:"
                 "\t\tUA norm =",torch.abs(UA.detach()).mean().item())
-    print("----------------------------------------")
+        print("----------------------------------------")
     return outA
 
 
